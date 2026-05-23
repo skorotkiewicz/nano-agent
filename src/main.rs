@@ -734,18 +734,29 @@ async fn run_chat(
             .cloned()
             .unwrap_or_default();
 
+        // Fallback: try to parse tool call from text content if tool_calls is empty
+        let parsed_tool_call = if tool_calls.is_empty() {
+            extract_tool_call_from_text(&text_content)
+        } else {
+            None
+        };
+
         messages.push(msg);
 
-        if tool_calls.is_empty() {
+        let tool_calls_to_process = if !tool_calls.is_empty() {
+            tool_calls
+        } else if let Some(tc) = parsed_tool_call {
+            vec![tc]
+        } else {
             return (
                 text_content,
                 Some("chat-session".to_string()),
                 Some(messages),
             );
-        }
+        };
 
-        for call in &tool_calls {
-            let call_id = call.get("id").and_then(|c| c.as_str()).unwrap_or("");
+        for call in &tool_calls_to_process {
+            let call_id = call.get("id").and_then(|c| c.as_str()).unwrap_or("call_1");
             let func = call.get("function").cloned().unwrap_or_default();
             let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args_str = func
@@ -774,6 +785,27 @@ async fn run_chat(
         Some("chat-session".to_string()),
         Some(messages),
     )
+}
+
+fn extract_tool_call_from_text(text: &str) -> Option<serde_json::Value> {
+    // Look for JSON object with "name": "execute_shell" in the text
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{')
+            && trimmed.contains("\"name\"")
+            && trimmed.contains("\"execute_shell\"")
+        {
+            // Try to parse as tool call format
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                return Some(serde_json::json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": parsed
+                }));
+            }
+        }
+    }
+    None
 }
 
 // --- Repl & State ---
