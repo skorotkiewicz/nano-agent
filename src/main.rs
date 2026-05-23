@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 // --- Constants & Globals ---
 const SKIP_DIRS: &[&str] = &[".git", ".venv", "__pycache__", "node_modules", "venv"];
@@ -58,9 +58,15 @@ fn check_api_key() {
 fn get_api_config() -> (String, ApiFormat) {
     if let Ok(base) = env::var("OPENAI_BASE_URL") {
         let base = base.trim_end_matches('/');
-        (format!("{}/chat/completions", base), ApiFormat::ChatCompletions)
+        (
+            format!("{}/chat/completions", base),
+            ApiFormat::ChatCompletions,
+        )
     } else {
-        ("https://api.openai.com/v1/responses".to_string(), ApiFormat::Responses)
+        (
+            "https://api.openai.com/v1/responses".to_string(),
+            ApiFormat::Responses,
+        )
     }
 }
 
@@ -129,7 +135,10 @@ fn pick_session() -> Option<Session> {
         .to_str()
         .unwrap_or("")
         .to_string();
-    let sessions: Vec<Session> = load_sessions().into_iter().filter(|s| s.cwd == cwd).collect();
+    let sessions: Vec<Session> = load_sessions()
+        .into_iter()
+        .filter(|s| s.cwd == cwd)
+        .collect();
 
     if sessions.is_empty() {
         eprintln!("no sessions in this directory");
@@ -191,7 +200,12 @@ fn find_files(roots: Vec<String>, names: Vec<&str>, limit: usize) -> String {
 
         for entry in walkdir::WalkDir::new(&root_path)
             .into_iter()
-            .filter_entry(|e| e.file_name().to_str().map(|s| !SKIP_DIRS.contains(&s)).unwrap_or(true))
+            .filter_entry(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|s| !SKIP_DIRS.contains(&s))
+                    .unwrap_or(true)
+            })
         {
             let entry = match entry {
                 Ok(e) => e,
@@ -206,7 +220,10 @@ fn find_files(roots: Vec<String>, names: Vec<&str>, limit: usize) -> String {
             if names.iter().any(|n| file_name == *n) {
                 let path = entry.path().to_path_buf();
                 let path_str = if path.starts_with(&home) {
-                    format!("~/{}", path.strip_prefix(&home).unwrap().to_str().unwrap_or(""))
+                    format!(
+                        "~/{}",
+                        path.strip_prefix(&home).unwrap().to_str().unwrap_or("")
+                    )
                 } else {
                     path.to_str().unwrap_or("").to_string()
                 };
@@ -255,8 +272,14 @@ fn get_system() -> &'static str {
             40,
         );
 
+        // "You are Nano, a shell agent. Use the execute_shell tool for ALL shell commands.\n\
+        //  When user asks for shell commands, ALWAYS make a tool_call to execute_shell - never describe the command in text.\n\
+        //  description must be exactly 5-10 words explaining why this command is useful.\n\
+        //  Be concise. No markdown. cwd: {}\n\
+
         format!(
             "You are Nano, a general-purpose shell agent with one tool: execute_shell.\n\
+             When user asks for shell commands, ALWAYS make a tool_call to execute_shell\n\
              Use it to inspect, edit, install, test, search, automate, and answer.\n\
              Be concise, tenacious, and relentlessly useful. Keep taking shell steps until done or blocked.\n\
              Output short plain-text snippets optimized for terminal reading; no markdown rendering or syntax highlighting.\n\
@@ -337,18 +360,21 @@ fn approve_sync(args: &serde_json::Value) -> bool {
         "{}",
         color(
             "32",
-            &format!("$ {}", args.get("command").and_then(|c| c.as_str()).unwrap_or(""))
+            &format!(
+                "$ {}",
+                args.get("command").and_then(|c| c.as_str()).unwrap_or("")
+            )
         )
     );
 
     for key in &["cwd", "timeout", "env"] {
         let val = args.get(*key);
-        if val.is_some()
-            && val != Some(&serde_json::Value::Null)
-            && val != Some(&serde_json::Value::String(String::new()))
-            && val != Some(&serde_json::Value::Object(serde_json::Map::new()))
+        if let Some(v) = val
+            && v != &serde_json::Value::Null
+            && v != &serde_json::Value::String(String::new())
+            && v != &serde_json::Value::Object(serde_json::Map::new())
         {
-            eprintln!("{}", color("90", &format!("{}: {}", key, val.unwrap())));
+            eprintln!("{}", color("90", &format!("{}: {}", key, v)));
         }
     }
 
@@ -428,7 +454,10 @@ async fn execute_shell(args: &serde_json::Value) -> String {
 }
 
 // --- API Interaction ---
-async fn respond_api(client: &Client, body: serde_json::Value) -> Result<serde_json::Value, reqwest::Error> {
+async fn respond_api(
+    client: &Client,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, reqwest::Error> {
     let (url, _) = get_api_config();
     let key = env::var("OPENAI_API_KEY").unwrap_or_default();
 
@@ -456,9 +485,7 @@ async fn respond_api(client: &Client, body: serde_json::Value) -> Result<serde_j
         None
     };
 
-    let mut req = client
-        .post(&url)
-        .header("Content-Type", "application/json");
+    let mut req = client.post(&url).header("Content-Type", "application/json");
 
     if !key.is_empty() {
         req = req.header("Authorization", format!("Bearer {}", key));
@@ -475,7 +502,11 @@ async fn respond_api(client: &Client, body: serde_json::Value) -> Result<serde_j
 }
 
 // --- Responses API Mode ---
-async fn respond_responses(client: &Client, payload: serde_json::Value, previous: Option<&str>) -> Result<serde_json::Value, reqwest::Error> {
+async fn respond_responses(
+    client: &Client,
+    payload: serde_json::Value,
+    previous: Option<&str>,
+) -> Result<serde_json::Value, reqwest::Error> {
     let mut body = serde_json::json!({
         "model": get_model(),
         "instructions": get_system(),
@@ -507,27 +538,42 @@ fn text(response: &serde_json::Value) -> String {
 }
 
 async fn tool_output_responses(call: &serde_json::Value) -> serde_json::Value {
-    let call_id = call.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
+    let call_id = call
+        .get("call_id")
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
     let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
     let result = if name != "execute_shell" {
         "unknown tool".to_string()
     } else {
-        let args_str = call.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
-        let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_else(|e| {
-            serde_json::json!({"error": format!("bad arguments: {}", e)})
-        });
+        let args_str = call
+            .get("arguments")
+            .and_then(|a| a.as_str())
+            .unwrap_or("{}");
+        let args: serde_json::Value = serde_json::from_str(args_str)
+            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
 
         if args.get("error").is_some() {
-            args.get("error").unwrap().as_str().unwrap_or("bad arguments").to_string()
+            args.get("error")
+                .unwrap()
+                .as_str()
+                .unwrap_or("bad arguments")
+                .to_string()
         } else {
-            let desc = args.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            let desc = args
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
             let words = desc.split_whitespace().count();
-            if words < 5 || words > 10 {
+            if !(5..=10).contains(&words) {
                 "bad arguments: description must be 5-10 words".to_string()
             } else {
                 let args_clone = args.clone();
-                let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone)).await.unwrap_or(false);
+                let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
+                    .await
+                    .unwrap_or(false);
                 if approved {
                     execute_shell(&args).await
                 } else {
@@ -544,14 +590,21 @@ async fn tool_output_responses(call: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>) -> (String, Option<String>, Option<Vec<serde_json::Value>>) {
+async fn run_responses(
+    client: &Client,
+    prompt: &str,
+    previous: Option<&str>,
+) -> (String, Option<String>, Option<Vec<serde_json::Value>>) {
     let payload = serde_json::json!([{"type": "message", "role": "user", "content": prompt}]);
     let mut response = match respond_responses(client, payload, previous).await {
         Ok(r) => r,
         Err(e) => return (format!("API Error: {}", e), None, None),
     };
 
-    let mut prev_id = response.get("id").and_then(|i| i.as_str()).map(String::from);
+    let mut prev_id = response
+        .get("id")
+        .and_then(|i| i.as_str())
+        .map(String::from);
 
     for _ in 0..get_max_steps() {
         let calls: Vec<&serde_json::Value> = response
@@ -573,18 +626,30 @@ async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>) ->
             outputs.push(tool_output_responses(call).await);
         }
 
-        response = match respond_responses(client, serde_json::Value::Array(outputs), prev_id.as_deref()).await {
+        response = match respond_responses(
+            client,
+            serde_json::Value::Array(outputs),
+            prev_id.as_deref(),
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => return (format!("API Error: {}", e), prev_id, None),
         };
-        prev_id = response.get("id").and_then(|i| i.as_str()).map(String::from);
+        prev_id = response
+            .get("id")
+            .and_then(|i| i.as_str())
+            .map(String::from);
     }
 
     ("stopped: too many tool calls".to_string(), prev_id, None)
 }
 
 // --- Chat Completions API Mode ---
-async fn respond_chat(client: &Client, messages: &[serde_json::Value]) -> Result<serde_json::Value, reqwest::Error> {
+async fn respond_chat(
+    client: &Client,
+    messages: &[serde_json::Value],
+) -> Result<serde_json::Value, reqwest::Error> {
     let body = serde_json::json!({
         "model": get_model(),
         "messages": messages,
@@ -597,20 +662,28 @@ async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_js
     let result = if name != "execute_shell" {
         "unknown tool".to_string()
     } else {
-        let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_else(|e| {
-            serde_json::json!({"error": format!("bad arguments: {}", e)})
-        });
+        let args: serde_json::Value = serde_json::from_str(args_str)
+            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
 
         if args.get("error").is_some() {
-            args.get("error").unwrap().as_str().unwrap_or("bad arguments").to_string()
+            args.get("error")
+                .unwrap()
+                .as_str()
+                .unwrap_or("bad arguments")
+                .to_string()
         } else {
-            let desc = args.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            let desc = args
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
             let words = desc.split_whitespace().count();
-            if words < 5 || words > 10 {
+            if !(5..=10).contains(&words) {
                 "bad arguments: description must be 5-10 words".to_string()
             } else {
                 let args_clone = args.clone();
-                let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone)).await.unwrap_or(false);
+                let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
+                    .await
+                    .unwrap_or(false);
                 if approved {
                     execute_shell(&args).await
                 } else {
@@ -627,7 +700,11 @@ async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_js
     })
 }
 
-async fn run_chat(client: &Client, prompt: &str, mut messages: Vec<serde_json::Value>) -> (String, Option<String>, Option<Vec<serde_json::Value>>) {
+async fn run_chat(
+    client: &Client,
+    prompt: &str,
+    mut messages: Vec<serde_json::Value>,
+) -> (String, Option<String>, Option<Vec<serde_json::Value>>) {
     if messages.is_empty() {
         messages.push(serde_json::json!({"role": "system", "content": get_system()}));
     }
@@ -639,23 +716,42 @@ async fn run_chat(client: &Client, prompt: &str, mut messages: Vec<serde_json::V
     };
 
     for _ in 0..get_max_steps() {
-        let choice = response.get("choices").and_then(|c| c.get(0)).cloned().unwrap_or_default();
+        let choice = response
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .cloned()
+            .unwrap_or_default();
         let msg = choice.get("message").cloned().unwrap_or_default();
 
-        let text_content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-        let tool_calls = msg.get("tool_calls").and_then(|tc| tc.as_array()).cloned().unwrap_or_default();
+        let text_content = msg
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        let tool_calls = msg
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         messages.push(msg);
 
         if tool_calls.is_empty() {
-            return (text_content, Some("chat-session".to_string()), Some(messages));
+            return (
+                text_content,
+                Some("chat-session".to_string()),
+                Some(messages),
+            );
         }
 
         for call in &tool_calls {
             let call_id = call.get("id").and_then(|c| c.as_str()).unwrap_or("");
             let func = call.get("function").cloned().unwrap_or_default();
             let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let args_str = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("{}");
+            let args_str = func
+                .get("arguments")
+                .and_then(|a| a.as_str())
+                .unwrap_or("{}");
 
             let output = tool_output_chat(name, args_str, call_id).await;
             messages.push(output);
@@ -663,11 +759,21 @@ async fn run_chat(client: &Client, prompt: &str, mut messages: Vec<serde_json::V
 
         response = match respond_chat(client, &messages).await {
             Ok(r) => r,
-            Err(e) => return (format!("API Error: {}", e), Some("chat-session".to_string()), Some(messages)),
+            Err(e) => {
+                return (
+                    format!("API Error: {}", e),
+                    Some("chat-session".to_string()),
+                    Some(messages),
+                );
+            }
         };
     }
 
-    ("stopped: too many tool calls".to_string(), Some("chat-session".to_string()), Some(messages))
+    (
+        "stopped: too many tool calls".to_string(),
+        Some("chat-session".to_string()),
+        Some(messages),
+    )
 }
 
 // --- Repl & State ---
@@ -719,9 +825,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
             SessionState::Responses { previous } => {
                 run_responses(client, &prompt, previous.as_deref()).await
             }
-            SessionState::Chat { messages } => {
-                run_chat(client, &prompt, messages.clone()).await
-            }
+            SessionState::Chat { messages } => run_chat(client, &prompt, messages.clone()).await,
         };
 
         let (answer, prev_id, new_messages) = result;
@@ -735,7 +839,11 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
             }
             SessionState::Chat { messages } => {
                 if let Some(msgs) = new_messages {
-                    save_session("chat-session", label.as_deref().unwrap_or(""), Some(msgs.clone()));
+                    save_session(
+                        "chat-session",
+                        label.as_deref().unwrap_or(""),
+                        Some(msgs.clone()),
+                    );
                     *messages = msgs;
                 }
             }
@@ -775,9 +883,11 @@ async fn main() {
             if let Some(session) = pick_session() {
                 eprintln!("{}", color("90", &format!("resuming: {}", session.label)));
                 state = match format {
-                    ApiFormat::Responses => SessionState::Responses { previous: Some(session.id) },
+                    ApiFormat::Responses => SessionState::Responses {
+                        previous: Some(session.id),
+                    },
                     ApiFormat::ChatCompletions => SessionState::Chat {
-                        messages: session.messages.unwrap_or_default()
+                        messages: session.messages.unwrap_or_default(),
                     },
                 };
                 label = Some(session.label);
@@ -789,8 +899,10 @@ async fn main() {
                 .to_str()
                 .unwrap_or("")
                 .to_string();
-            let sessions: Vec<Session> =
-                load_sessions().into_iter().filter(|s| s.cwd == cwd).collect();
+            let sessions: Vec<Session> = load_sessions()
+                .into_iter()
+                .filter(|s| s.cwd == cwd)
+                .collect();
             if sessions.is_empty() {
                 eprintln!("no sessions in this directory");
                 std::process::exit(1);
@@ -798,9 +910,11 @@ async fn main() {
             let last = sessions.last().unwrap();
             eprintln!("{}", color("90", &format!("continuing: {}", last.label)));
             state = match format {
-                ApiFormat::Responses => SessionState::Responses { previous: Some(last.id.clone()) },
+                ApiFormat::Responses => SessionState::Responses {
+                    previous: Some(last.id.clone()),
+                },
                 ApiFormat::ChatCompletions => SessionState::Chat {
-                    messages: last.messages.clone().unwrap_or_default()
+                    messages: last.messages.clone().unwrap_or_default(),
                 },
             };
             label = Some(last.label.clone());
@@ -813,9 +927,7 @@ async fn main() {
             SessionState::Responses { previous } => {
                 run_responses(&client, &prompt, previous.as_deref()).await
             }
-            SessionState::Chat { messages } => {
-                run_chat(&client, &prompt, messages.clone()).await
-            }
+            SessionState::Chat { messages } => run_chat(&client, &prompt, messages.clone()).await,
         };
 
         let (answer, prev_id, new_messages) = result;
