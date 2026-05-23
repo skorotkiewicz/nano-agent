@@ -26,6 +26,11 @@ impl Sandbox {
         self
     }
 
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
     pub fn wrap_command(&self, command: &str) -> Command {
         if !self.enabled {
             let mut cmd = Command::new(&self.shell);
@@ -51,5 +56,37 @@ impl Sandbox {
             command,
         ]);
         cmd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sandbox_new_creates_with_defaults() {
+        let sb = Sandbox::new(false);
+        assert!(!sb.enabled);
+        assert_eq!(sb.shell, "bash");
+    }
+
+    #[test]
+    fn test_sandbox_with_shell_sets_custom() {
+        let sb = Sandbox::new(false).with_shell("sh");
+        assert_eq!(sb.shell, "sh");
+    }
+
+    #[test]
+    fn test_sandbox_with_empty_shell_keeps_default() {
+        let sb = Sandbox::new(false).with_shell("");
+        // Empty string should keep the original shell (bash)
+        assert_eq!(sb.shell, "bash");
+    }
+
+    #[test]
+    fn test_sandbox_with_cwd() {
+        let custom_cwd = PathBuf::from("/tmp");
+        let sb = Sandbox::new(true).with_cwd(custom_cwd.clone());
+        assert_eq!(sb.cwd, custom_cwd);
     }
 }

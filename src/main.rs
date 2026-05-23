@@ -1,4 +1,5 @@
 use dirs::home_dir;
+use nano_agent::sandbox::Sandbox;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -418,10 +419,30 @@ async fn execute_shell(args: &serde_json::Value) -> String {
 
     let merged_command = format!("{} 2>&1", command);
 
-    let mut cmd = tokio::process::Command::new("sh"); // replace with sandbox
-    cmd.arg("-c").arg(&merged_command).current_dir(run_cwd);
+    let sandbox_enabled = env::var("NANO_SANDBOX")
+        .map(|v| v == "0" || v.to_lowercase() == "false")
+        .unwrap_or(true);
+    let sandbox = Sandbox::new(sandbox_enabled)
+        .with_shell("sh")
+        .with_cwd(run_cwd.clone());
 
-    // let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+    let mut cmd = sandbox.wrap_command(&merged_command);
+    cmd.current_dir(&run_cwd);
+
+    let mut current_env: Vec<(String, String)> = env::vars().collect();
+    if let Some(env_map) = env_vars {
+        for (k, v) in env_map {
+            if let Some(val) = v.as_str() {
+                current_env.push((k.clone(), val.to_string()));
+            }
+        }
+    }
+    cmd.envs(current_env);
+
+    cmd.stdout(std::process::Stdio::piped());
+
+    let output_result = timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
+    // let output_result = timeout(Duration::from_secs(timeout_secs), async {
     //     if let Some(sb) = sandbox {
     //         sb.wrap_command(&args.command)
     //             .current_dir(cwd)
@@ -438,21 +459,7 @@ async fn execute_shell(args: &serde_json::Value) -> String {
     // })
     // .await;
 
-    let mut current_env: Vec<(String, String)> = env::vars().collect();
-    if let Some(env_map) = env_vars {
-        for (k, v) in env_map {
-            if let Some(val) = v.as_str() {
-                current_env.push((k.clone(), val.to_string()));
-            }
-        }
-    }
-    cmd.envs(current_env);
-
-    cmd.stdout(std::process::Stdio::piped());
-
-    let output_result = timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
-
-    match output_result {
+      match output_result {
         Ok(Ok(output)) => {
             let mut res = format!(
                 "$ {}\nexit {}\n",
@@ -806,6 +813,7 @@ async fn run_chat(
     )
 }
 
+#[allow(dead_code)]
 fn extract_tool_call_from_text(text: &str) -> Option<serde_json::Value> {
     // Look for JSON object with "name": "execute_shell" in the text
     for line in text.lines() {
