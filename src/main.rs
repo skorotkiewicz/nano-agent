@@ -260,13 +260,14 @@ fn get_system() -> &'static str {
             .unwrap_or("")
             .to_string();
 
-        let docs = find_files(vec![cwd.clone()], vec!["claude.md", "agent.md", "agents.md", "readme.md"], 40);
+        let docs = find_files(vec![cwd.clone()], vec!["claude.md", "agent.md", "agents.md", "AGENTS.md", "readme.md"], 40);
         let skills = find_files(
             vec![
                 ".claude/skills".to_string(),
-                format!("{}/.claude/skills", home),
-                format!("{}/.codex/skills", home),
-                format!("{}/.codex/plugins", home),
+                // format!("{}/.claude/skills", home),
+                // format!("{}/.codex/skills", home),
+                // format!("{}/.codex/plugins", home),
+                format!("{}/.pi/agent/_skills", home),
             ],
             vec!["skill.md", "skills.md"],
             40,
@@ -417,8 +418,25 @@ async fn execute_shell(args: &serde_json::Value) -> String {
 
     let merged_command = format!("{} 2>&1", command);
 
-    let mut cmd = tokio::process::Command::new("sh");
+    let mut cmd = tokio::process::Command::new("sh"); // replace with sandbox
     cmd.arg("-c").arg(&merged_command).current_dir(run_cwd);
+
+    // let result = tokio::time::timeout(std::time::Duration::from_secs(timeout), async {
+    //     if let Some(sb) = sandbox {
+    //         sb.wrap_command(&args.command)
+    //             .current_dir(cwd)
+    //             .output()
+    //             .await
+    //     } else {
+    //         tokio::process::Command::new("sh")
+    //             .arg("-c")
+    //             .arg(&args.command)
+    //             .current_dir(cwd)
+    //             .output()
+    //             .await
+    //     }
+    // })
+    // .await;
 
     let mut current_env: Vec<(String, String)> = env::vars().collect();
     if let Some(env_map) = env_vars {
@@ -735,18 +753,19 @@ async fn run_chat(
             .unwrap_or_default();
 
         // Fallback: try to parse tool call from text content if tool_calls is empty
-        let parsed_tool_call = if tool_calls.is_empty() {
-            extract_tool_call_from_text(&text_content)
-        } else {
-            None
-        };
+
+        // let parsed_tool_call = if tool_calls.is_empty() {
+        //     extract_tool_call_from_text(&text_content)
+        // } else {
+        //     None
+        // };
 
         messages.push(msg);
 
         let tool_calls_to_process = if !tool_calls.is_empty() {
             tool_calls
-        } else if let Some(tc) = parsed_tool_call {
-            vec![tc]
+        // } else if let Some(tc) = parsed_tool_call {
+        //     vec![tc]
         } else {
             return (
                 text_content,
