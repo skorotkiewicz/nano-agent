@@ -15,6 +15,20 @@ pub struct QuickModel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpServerConfig {
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -24,6 +38,8 @@ pub struct Config {
     pub custom_providers: std::collections::HashMap<String, CustomProvider>,
     #[serde(default)]
     pub quick_models: std::collections::HashMap<String, QuickModel>,
+    #[serde(default)]
+    pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
 }
 
 impl Config {
@@ -155,5 +171,53 @@ mod tests {
         assert_eq!(config.get_provider(), Some("openai"));
         assert_eq!(config.get_max_tokens(), Some(4096));
         assert_eq!(config.get_temperature(), Some(0.7));
+    }
+
+    #[test]
+    fn test_load_config_with_mcp_servers() {
+        let config = r#"{
+            "mcp_servers": {
+                "semble": {
+                    "command": "uvx",
+                    "args": ["--from", "semble[mcp]", "semble"]
+                }
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        assert!(parsed.mcp_servers.contains_key("semble"));
+    }
+
+    #[test]
+    fn test_mcp_server_config_defaults() {
+        let config = r#"{
+            "mcp_servers": {
+                "test": {}
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        let server = parsed.mcp_servers.get("test").unwrap();
+        assert!(server.command.is_none());
+        assert!(server.args.is_empty());
+        assert!(server.env.is_empty());
+        assert!(server.url.is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_config_url() {
+        let config = r#"{
+            "mcp_servers": {
+                "context7": {
+                    "url": "https://mcp.context7.com/mcp",
+                    "headers": {
+                        "CONTEXT7_API_KEY": "ctx7sk-..."
+                    }
+                }
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        let server = parsed.mcp_servers.get("context7").unwrap();
+        assert!(server.url.is_some());
+        assert_eq!(server.url.as_ref().unwrap(), "https://mcp.context7.com/mcp");
+        assert!(server.headers.contains_key("CONTEXT7_API_KEY"));
     }
 }

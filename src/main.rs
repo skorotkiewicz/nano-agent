@@ -1,5 +1,5 @@
 use dirs::home_dir;
-use nano_agent::{config::Config, sandbox::Sandbox};
+use nano_agent::{config::Config, mcp::McpClient, sandbox::Sandbox};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -27,9 +27,14 @@ static MODEL: OnceLock<String> = OnceLock::new();
 static MAX_STEPS: OnceLock<usize> = OnceLock::new();
 static SESSIONS_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SYSTEM: OnceLock<String> = OnceLock::new();
+static MCP_CLIENT: OnceLock<McpClient> = OnceLock::new();
 
 fn get_config() -> &'static Config {
     CONFIG.get_or_init(Config::load)
+}
+
+fn get_mcp_client() -> &'static McpClient {
+    MCP_CLIENT.get_or_init(McpClient::new)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -545,10 +550,13 @@ async fn respond_responses(
     payload: serde_json::Value,
     previous: Option<&str>,
 ) -> Result<serde_json::Value, reqwest::Error> {
+    let mut tools: Vec<serde_json::Value> = vec![get_tool_responses().clone()];
+    tools.extend(get_mcp_client().get_tools_schema().await);
+
     let mut body = serde_json::json!({
         "model": get_model(),
         "instructions": get_system(),
-        "tools": [get_tool_responses()],
+        "tools": tools,
         "input": payload
     });
     if let Some(prev) = previous {
@@ -584,9 +592,27 @@ async fn tool_output_responses(call: &serde_json::Value) -> serde_json::Value {
         .to_string();
     let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
 
-    let result = if name != "execute_shell" {
-        "unknown tool".to_string()
-    } else {
+    let result = if get_mcp_client().has_tool(name).await {
+        let args_str = call
+            .get("arguments")
+            .and_then(|a| a.as_str())
+            .unwrap_or("{}");
+        let args: serde_json::Value = serde_json::from_str(args_str)
+            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
+
+        if args.get("error").is_some() {
+            args.get("error")
+                .unwrap()
+                .as_str()
+                .unwrap_or("bad arguments")
+                .to_string()
+        } else {
+            get_mcp_client()
+                .call_tool(name, args)
+                .await
+                .unwrap_or_else(|e| e)
+        }
+    } else if name == "execute_shell" {
         let args_str = call
             .get("arguments")
             .and_then(|a| a.as_str())
@@ -620,6 +646,8 @@ async fn tool_output_responses(call: &serde_json::Value) -> serde_json::Value {
                 }
             }
         }
+    } else {
+        "unknown tool".to_string()
     };
 
     serde_json::json!({
@@ -689,19 +717,37 @@ async fn respond_chat(
     client: &Client,
     messages: &[serde_json::Value],
 ) -> Result<serde_json::Value, reqwest::Error> {
+    let mut tools = vec![serde_json::json!({"type": "function", "function": get_tool_chat()})];
+    for tool in get_mcp_client().get_tools_schema().await {
+        tools.push(serde_json::json!({"type": "function", "function": tool}));
+    }
     let body = serde_json::json!({
         "model": get_model(),
         "messages": messages,
-        "tools": [{"type": "function", "function": get_tool_chat()}]
+        "tools": tools
     });
     let (_, _, api_key) = get_api_config();
     respond_api(client, body, &api_key).await
 }
 
 async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_json::Value {
-    let result = if name != "execute_shell" {
-        "unknown tool".to_string()
-    } else {
+    let result = if get_mcp_client().has_tool(name).await {
+        let args: serde_json::Value = serde_json::from_str(args_str)
+            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
+
+        if args.get("error").is_some() {
+            args.get("error")
+                .unwrap()
+                .as_str()
+                .unwrap_or("bad arguments")
+                .to_string()
+        } else {
+            get_mcp_client()
+                .call_tool(name, args)
+                .await
+                .unwrap_or_else(|e| e)
+        }
+    } else if name == "execute_shell" {
         let args: serde_json::Value = serde_json::from_str(args_str)
             .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
 
@@ -731,6 +777,8 @@ async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_js
                 }
             }
         }
+    } else {
+        "unknown tool".to_string()
     };
 
     serde_json::json!({
@@ -934,6 +982,9 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
 #[tokio::main]
 async fn main() {
     check_api_key();
+
+    // Load MCP servers
+    get_mcp_client().load_servers(get_config()).await;
 
     let client = Client::new();
     let mut args: Vec<String> = env::args().skip(1).collect();

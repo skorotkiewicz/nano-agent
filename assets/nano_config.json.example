@@ -20,5 +20,17 @@
       "provider": "openrouter",
       "model": "google/gemini-flash-1.5"
     }
+  },
+  "mcp_servers": {
+    "semble": {
+      "command": "uvx",
+      "args": ["--from", "semble[mcp]", "semble"]
+    },
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "ctx7sk-"
+      }
+    }
   }
 }
