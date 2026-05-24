@@ -94,14 +94,17 @@ impl McpServer {
     }
 
     async fn read_response(&mut self) -> Result<Value, String> {
-        use tokio::io::{AsyncReadExt, AsyncBufReadExt};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
         let mut reader = self.reader.lock().await;
-        
+
         // Read headers line by line
         let mut headers = String::new();
         loop {
             let mut line = String::new();
-            reader.read_line(&mut line).await.map_err(|e| e.to_string())?;
+            reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| e.to_string())?;
             if line == "\r\n" || line == "\n" {
                 break;
             }
@@ -120,7 +123,10 @@ impl McpServer {
             .unwrap_or(0);
 
         let mut content = vec![0u8; content_length];
-        reader.read_exact(&mut content).await.map_err(|e| format!("Read error: {}", e))?;
+        reader
+            .read_exact(&mut content)
+            .await
+            .map_err(|e| format!("Read error: {}", e))?;
 
         let json_str = String::from_utf8_lossy(&content);
         serde_json::from_str(&json_str).map_err(|e| format!("Parse error: {}", e))

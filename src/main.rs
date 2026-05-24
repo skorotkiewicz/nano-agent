@@ -906,15 +906,17 @@ enum SessionState {
 
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
     eprintln!(
-        "{} repl {}",
+        "{} repl {} mcp: {}",
         color("1", "nano"),
-        color("90", "(:q quit, :reset reset)")
+        color("90", "(:q quit, :reset reset)"),
+        color("90", &get_mcp_client().status())
     );
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
     loop {
-        eprint!("{} ", color("36", "nano >"));
+        let mcp_status = get_mcp_client().status();
+        eprint!("{} {} ", color("36", "nano >"), color("90", &mcp_status));
         let _ = io::stderr().flush();
 
         let prompt = match lines.next_line().await {
