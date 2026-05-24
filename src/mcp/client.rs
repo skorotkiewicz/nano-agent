@@ -1,16 +1,20 @@
-use crate::config::Config;
-use crate::mcp::{McpServer, McpTool};
+use crate::mcp::McpTool;
+use compact_str::CompactString;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+// use crate::mcp::server::McpServerHandle;
+use super::server::McpServerHandle;
+
 pub struct McpClient {
-    servers: Arc<Mutex<HashMap<String, McpServer>>>,
+    servers: Arc<Mutex<HashMap<String, McpServerHandle>>>,
     tools: Arc<Mutex<Vec<McpTool>>>,
     cache_path: PathBuf,
     total_servers: Arc<Mutex<usize>>,
+    server_configs: Arc<Mutex<HashMap<String, crate::config::McpServerConfig>>>,
 }
 
 impl McpClient {
@@ -25,49 +29,53 @@ impl McpClient {
             tools: Arc::new(Mutex::new(Vec::new())),
             cache_path,
             total_servers: Arc::new(Mutex::new(0)),
+            server_configs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn load_servers(&self, config: &Config) {
+    pub async fn load_servers(&self, config: &crate::config::Config) {
         *self.total_servers.lock().await = config.mcp_servers.len();
         let total = *self.total_servers.lock().await;
 
-        // Try loading from cache first
-        if let Some(cached_tools) = Self::load_from_cache(&self.cache_path).await {
-            // Check if config changed since cache was created
-            if self.is_cache_valid(config).await {
-                self.tools.lock().await.extend(cached_tools);
-                eprintln!("(mcp: 0/{}) servers (from cache)", total);
-                return;
+        // Store server configs for lazy connection
+        {
+            let mut configs = self.server_configs.lock().await;
+            for (name, server_config) in &config.mcp_servers {
+                configs.insert(name.clone(), server_config.clone());
             }
+        }
+
+        // Try loading from cache first
+        if let Some(cached_tools) = Self::load_from_cache(&self.cache_path).await
+            && self.is_cache_valid(config).await
+        {
+            self.tools.lock().await.extend(cached_tools);
+            return;
         }
 
         eprintln!("(mcp: 0/{}) servers", total);
 
-        // No valid cache, connect to servers
         let mut connected = 0;
         for (name, server_config) in &config.mcp_servers {
-            if let Ok(mut server) = McpServer::start(server_config, name).await
-                && let Ok(tools) = server.initialize().await
-            {
-                self.tools.lock().await.extend(tools.clone());
-                self.servers.lock().await.insert(name.clone(), server);
-                connected += 1;
-                eprintln!("\r(mcp: {}/{}) servers", connected, total);
+            match McpServerHandle::connect(CompactString::new(name.clone()), server_config).await {
+                Ok(mut server) => match server.list_tools().await {
+                    Ok(tools) => {
+                        self.tools.lock().await.extend(tools.clone());
+                        self.servers.lock().await.insert(name.clone(), server);
+                        connected += 1;
+                        eprintln!("\r(mcp: {}/{}) servers", connected, total);
+                    }
+                    Err(e) => {
+                        eprintln!("\n[WARN] MCP server '{}' failed to initialize: {}", name, e);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("\n[WARN] MCP server '{}' failed to start: {}", name, e);
+                }
             }
         }
 
-        // Save to cache
         self.save_to_cache().await;
-    }
-
-    pub async fn connect_to_server(&self, server_name: &str) -> Result<(), String> {
-        // This would be called when an MCP tool is actually invoked
-        // For now, servers are connected at startup via load_servers
-        Err(format!(
-            "Dynamic server connection not yet implemented: {}",
-            server_name
-        ))
     }
 
     pub fn status(&self) -> String {
@@ -94,18 +102,14 @@ impl McpClient {
         }
     }
 
-    async fn is_cache_valid(&self, _config: &Config) -> bool {
-        // Simple check: cache is valid if no MCP servers are configured
-        // or if cache file is newer than config file
+    async fn is_cache_valid(&self, _config: &crate::config::Config) -> bool {
         if !self.cache_path.exists() {
             return false;
         }
 
         let cache_modified = self.cache_path.metadata().and_then(|m| m.modified()).ok();
 
-        // If config file is newer than cache, invalidate
         if let Some(cache_time) = cache_modified {
-            // Check nano_config.json
             let config_path = std::env::current_dir()
                 .unwrap_or_default()
                 .join("nano_config.json");
@@ -135,14 +139,35 @@ impl McpClient {
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
-        let server_name = {
+        let (server_name, config) = {
             let tools = self.tools.lock().await;
             let tool = tools
                 .iter()
                 .find(|t| t.name == name)
                 .ok_or_else(|| "tool not found".to_string())?;
-            tool.server_name.clone()
+            let name = tool.server_name.clone();
+            drop(tools);
+
+            // Get config for this server
+            let configs = self.server_configs.lock().await;
+            let config = configs
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| "server config not found".to_string())?;
+            (name, config)
         };
+
+        // Check if already connected, if not connect lazily
+        {
+            let mut servers = self.servers.lock().await;
+            if !servers.contains_key(&server_name) {
+                let mut server =
+                    McpServerHandle::connect(CompactString::new(server_name.clone()), &config)
+                        .await?;
+                server.list_tools().await?; // Initialize tools
+                servers.insert(server_name.clone(), server);
+            }
+        }
 
         let mut servers = self.servers.lock().await;
         let server = servers

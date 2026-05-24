@@ -3,7 +3,7 @@ pub mod mcp;
 pub mod sandbox;
 
 pub use config::Config;
-pub use mcp::{McpClient, McpServer, McpTool};
+pub use mcp::{McpClient, McpServerHandle, McpTool};
 pub use sandbox::Sandbox;
 
 #[cfg(test)]

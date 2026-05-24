@@ -1,190 +1,132 @@
 use crate::config::McpServerConfig;
 use crate::mcp::McpTool;
+use compact_str::CompactString;
+use rmcp::model::CallToolRequestParams;
+use rmcp::service::{Peer, RoleClient, RunningService, serve_client};
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncWriteExt, BufReader};
+use std::collections::HashMap;
 use tokio::process::Command;
-use tokio::sync::Mutex;
 
-pub struct McpServer {
-    name: String,
-    #[allow(dead_code)]
-    child: tokio::process::Child,
-    reader: Mutex<BufReader<tokio::process::ChildStdout>>,
-    writer: Mutex<tokio::process::ChildStdin>,
-    request_id: AtomicU64,
+pub struct McpServerHandle {
+    pub server_name: CompactString,
+    pub running_service: RunningService<RoleClient, ()>,
     tools: Vec<McpTool>,
 }
 
-impl McpServer {
-    pub async fn start(config: &McpServerConfig, name: &str) -> Result<Self, String> {
-        if let Some(url) = &config.url {
-            return Err(format!("HTTP MCP servers not yet supported: {}", url));
-        }
+impl McpServerHandle {
+    pub async fn connect(
+        server_name: CompactString,
+        config: &McpServerConfig,
+    ) -> Result<Self, String> {
+        let running_service = if let Some(url) = &config.url {
+            // HTTP-based MCP server
+            let mut cfg = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url.as_str());
+            if !config.headers.is_empty() {
+                let headers = parse_headers(&config.headers)?;
+                cfg = cfg.custom_headers(headers);
+            }
+            let transport =
+                rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_config(
+                    cfg,
+                );
+            serve_client((), transport)
+                .await
+                .map_err(|e| format!("MCP HTTP connection failed for '{}': {}", server_name, e))?
+        } else {
+            // Stdio-based MCP server
+            let command = config
+                .command
+                .as_ref()
+                .ok_or("command or url required for MCP server")?;
 
-        let command = config
-            .command
-            .as_ref()
-            .ok_or("command required for stdio MCP server")?;
+            let mut cmd = Command::new(command);
+            cmd.args(&config.args);
+            for (key, val) in &config.env {
+                cmd.env(key, val);
+            }
 
-        let mut cmd = Command::new(command);
-        cmd.args(&config.args);
-        for (key, val) in &config.env {
-            cmd.env(key, val);
-        }
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::inherit());
+            let transport = rmcp::transport::TokioChildProcess::new(cmd)
+                .map_err(|e| format!("Failed to create transport: {}", e))?;
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
+            serve_client((), transport)
+                .await
+                .map_err(|e| format!("MCP connection failed for '{}': {}", server_name, e))?
+        };
 
-        let stdout = child.stdout.take().ok_or("failed to get stdout")?;
-
-        let stdin = child.stdin.take().ok_or("failed to get stdin")?;
-
-        Ok(McpServer {
-            name: name.to_string(),
-            child,
-            reader: Mutex::new(BufReader::new(stdout)),
-            writer: Mutex::new(stdin),
-            request_id: AtomicU64::new(1),
+        Ok(Self {
+            server_name,
+            running_service,
             tools: Vec::new(),
         })
     }
 
-    pub async fn initialize(&mut self) -> Result<Vec<McpTool>, String> {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": self.next_id(),
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "nano-agent", "version": "0.1.0"}
-            }
-        });
-        self.send_request(&request).await?;
-
-        self.list_tools().await
+    pub fn peer(&self) -> Peer<RoleClient> {
+        self.running_service.peer().clone()
     }
 
-    fn next_id(&self) -> u64 {
-        self.request_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    async fn send_request(&mut self, request: &Value) -> Result<Value, String> {
-        let mut writer = self.writer.lock().await;
-        let message = serde_json::to_string(request).map_err(|e| format!("JSON error: {}", e))?;
-
-        writer
-            .write_all(format!("Content-Length: {}\r\n\r\n{}", message.len(), message).as_bytes())
+    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, String> {
+        let tools = self
+            .running_service
+            .peer()
+            .list_all_tools()
             .await
-            .map_err(|e| format!("Write error: {}", e))?;
+            .map_err(|e| format!("List tools failed: {}", e))?;
 
-        writer
-            .flush()
-            .await
-            .map_err(|e| format!("Flush error: {}", e))?;
+        let result: Vec<McpTool> = tools
+            .into_iter()
+            .map(|t| McpTool {
+                name: t.name.to_string(),
+                description: t
+                    .description
+                    .as_ref()
+                    .map(|d| d.to_string())
+                    .unwrap_or_default(),
+                parameters: serde_json::to_value(&t.input_schema).unwrap_or_default(),
+                server_name: self.server_name.to_string(),
+            })
+            .collect();
 
-        drop(writer);
-
-        self.read_response().await
+        self.tools = result.clone();
+        Ok(result)
     }
 
-    async fn read_response(&mut self) -> Result<Value, String> {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-        let mut reader = self.reader.lock().await;
+    pub async fn call_tool(&self, tool_name: &str, args: Value) -> Result<String, String> {
+        let arguments: Option<rmcp::model::JsonObject> = serde_json::from_value(args).ok();
 
-        // Read headers line by line
-        let mut headers = String::new();
-        loop {
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .await
-                .map_err(|e| e.to_string())?;
-            if line == "\r\n" || line == "\n" {
-                break;
+        let params = arguments
+            .map(|a| CallToolRequestParams::new(tool_name.to_string()).with_arguments(a))
+            .unwrap_or_else(|| CallToolRequestParams::new(tool_name.to_string()));
+
+        let result = self
+            .running_service
+            .peer()
+            .call_tool(params)
+            .await
+            .map_err(|e| format!("Tool call failed: {}", e))?;
+
+        let mut content = String::new();
+        for item in result.content {
+            if let rmcp::model::RawContent::Text(t) = item.raw {
+                content.push_str(&t.text);
             }
-            headers.push_str(&line);
         }
 
-        let content_length = headers
-            .lines()
-            .find_map(|h| {
-                if h.to_lowercase().starts_with("content-length:") {
-                    h.split(':').nth(1)?.trim().parse().ok()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
-
-        let mut content = vec![0u8; content_length];
-        reader
-            .read_exact(&mut content)
-            .await
-            .map_err(|e| format!("Read error: {}", e))?;
-
-        let json_str = String::from_utf8_lossy(&content);
-        serde_json::from_str(&json_str).map_err(|e| format!("Parse error: {}", e))
+        Ok(content)
     }
+}
 
-    async fn list_tools(&mut self) -> Result<Vec<McpTool>, String> {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": self.next_id(),
-            "method": "tools/list",
-            "params": {}
-        });
-
-        let response = self.send_request(&request).await?;
-
-        let tools: Vec<McpTool> = response
-            .get("result")
-            .and_then(|r| r.get("tools"))
-            .and_then(|t| t.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|t| {
-                        Some(McpTool {
-                            name: t.get("name")?.as_str()?.to_string(),
-                            description: t.get("description")?.as_str()?.to_string(),
-                            parameters: t.get("inputSchema")?.clone(),
-                            server_name: self.name.clone(),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        self.tools = tools.clone();
-        Ok(tools)
+fn parse_headers(
+    headers: &HashMap<String, String>,
+) -> Result<HashMap<http::HeaderName, http::HeaderValue>, String> {
+    let mut result = HashMap::new();
+    for (name, value) in headers {
+        let h_name: http::HeaderName = name
+            .parse()
+            .map_err(|e| format!("Invalid header name '{}': {}", name, e))?;
+        let h_value: http::HeaderValue = value
+            .parse()
+            .map_err(|e| format!("Invalid header value for '{}': {}", name, e))?;
+        result.insert(h_name, h_value);
     }
-
-    pub async fn call_tool(&mut self, tool_name: &str, args: Value) -> Result<String, String> {
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": self.next_id(),
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": args
-            }
-        });
-
-        let response = self.send_request(&request).await?;
-
-        response
-            .get("result")
-            .and_then(|r| r.get("content"))
-            .and_then(|c| c.as_array())
-            .and_then(|arr| arr.first())
-            .and_then(|item| item.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| "No text in tool response".to_string())
-    }
+    Ok(result)
 }

@@ -3,5 +3,5 @@ mod server;
 mod tool;
 
 pub use client::McpClient;
-pub use server::McpServer;
+pub use server::McpServerHandle;
 pub use tool::McpTool;

@@ -915,8 +915,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
     let mut lines = stdin.lines();
 
     loop {
-        let mcp_status = get_mcp_client().status();
-        eprint!("{} {} ", color("36", "nano >"), color("90", &mcp_status));
+        eprint!("{} ", color("36", "nano >"));
         let _ = io::stderr().flush();
 
         let prompt = match lines.next_line().await {
