@@ -2,30 +2,97 @@ use crate::config::Config;
 use crate::mcp::{McpServer, McpTool};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub struct McpClient {
     servers: Arc<Mutex<HashMap<String, McpServer>>>,
     tools: Arc<Mutex<Vec<McpTool>>>,
+    cache_path: PathBuf,
 }
 
 impl McpClient {
     pub fn new() -> Self {
+        let cache_path = dirs::cache_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("nano")
+            .join("mcp_cache.json");
+        
         McpClient {
             servers: Arc::new(Mutex::new(HashMap::new())),
             tools: Arc::new(Mutex::new(Vec::new())),
+            cache_path,
         }
     }
 
     pub async fn load_servers(&self, config: &Config) {
+        // Try loading from cache first
+        if let Some(cached_tools) = Self::load_from_cache(&self.cache_path).await {
+            // Check if config changed since cache was created
+            if self.is_cache_valid(config).await {
+                self.tools.lock().await.extend(cached_tools);
+                return;
+            }
+        }
+        
+        // No valid cache, connect to servers
         for (name, server_config) in &config.mcp_servers {
             if let Ok(mut server) = McpServer::start(server_config, name).await
-                && let Ok(tools) = server.initialize().await
-            {
-                self.tools.lock().await.extend(tools.clone());
-                self.servers.lock().await.insert(name.clone(), server);
+                && let Ok(tools) = server.initialize().await {
+                    self.tools.lock().await.extend(tools.clone());
+                    self.servers.lock().await.insert(name.clone(), server);
+                }
+        }
+        
+        // Save to cache
+        self.save_to_cache().await;
+    }
+
+    async fn load_from_cache(path: &PathBuf) -> Option<Vec<McpTool>> {
+        if !path.exists() {
+            return None;
+        }
+        let data = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&data).ok()
+    }
+
+    async fn save_to_cache(&self) {
+        let tools = self.tools.lock().await.clone();
+        if let Ok(data) = serde_json::to_string(&tools) {
+            if let Some(parent) = self.cache_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
             }
+            let _ = std::fs::write(&self.cache_path, data);
+        }
+    }
+
+    async fn is_cache_valid(&self, _config: &Config) -> bool {
+        // Simple check: cache is valid if no MCP servers are configured
+        // or if cache file is newer than config file
+        if !self.cache_path.exists() {
+            return false;
+        }
+        
+        let cache_modified = self.cache_path.metadata()
+            .and_then(|m| m.modified())
+            .ok();
+        
+        // If config file is newer than cache, invalidate
+        if let Some(cache_time) = cache_modified {
+            // Check nano_config.json
+            let config_path = std::env::current_dir()
+                .unwrap_or_default()
+                .join("nano_config.json");
+            if config_path.exists()
+                && let Ok(config_modified) = config_path.metadata().and_then(|m| m.modified())
+                && config_modified > cache_time
+            {
+                return false;
+            }
+            true
+        } else {
+            false
         }
     }
 

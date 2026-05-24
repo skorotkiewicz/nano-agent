@@ -2,7 +2,7 @@ use crate::config::McpServerConfig;
 use crate::mcp::McpTool;
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -94,21 +94,18 @@ impl McpServer {
     }
 
     async fn read_response(&mut self) -> Result<Value, String> {
+        use tokio::io::{AsyncReadExt, AsyncBufReadExt};
         let mut reader = self.reader.lock().await;
-
+        
+        // Read headers line by line
         let mut headers = String::new();
-        let mut line = String::new();
-        while reader
-            .read_line(&mut line)
-            .await
-            .map_err(|e| e.to_string())?
-            > 0
-        {
-            headers.push_str(&line);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).await.map_err(|e| e.to_string())?;
             if line == "\r\n" || line == "\n" {
                 break;
             }
-            line.clear();
+            headers.push_str(&line);
         }
 
         let content_length = headers
@@ -123,13 +120,10 @@ impl McpServer {
             .unwrap_or(0);
 
         let mut content = vec![0u8; content_length];
-        use tokio::io::AsyncReadExt;
-        reader
-            .read_exact(&mut content)
-            .await
-            .map_err(|e| format!("Read error: {}", e))?;
+        reader.read_exact(&mut content).await.map_err(|e| format!("Read error: {}", e))?;
 
-        serde_json::from_slice(&content).map_err(|e| format!("Parse error: {}", e))
+        let json_str = String::from_utf8_lossy(&content);
+        serde_json::from_str(&json_str).map_err(|e| format!("Parse error: {}", e))
     }
 
     async fn list_tools(&mut self) -> Result<Vec<McpTool>, String> {
