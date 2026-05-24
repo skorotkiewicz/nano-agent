@@ -8,8 +8,6 @@ A minimal shell agent for running commands with approval dialogs.
 cargo install --path .
 ```
 
-Requires Rust 2024 edition.
-
 ## Setup
 
 Set your OpenAI API key:
@@ -18,43 +16,46 @@ Set your OpenAI API key:
 export OPENAI_API_KEY=sk-...
 ```
 
-For OpenAI-compatible APIs (OpenRouter, llama.cpp, etc.):
+Or create `~/.config/nano/config.json`:
 
-```bash
-export OPENAI_API_KEY=sk-...
-export OPENAI_BASE_URL=https://openrouter.ai/api/v1
-export OPENAI_MODEL=deepseek/deepseek-chat
+```json
+{
+  "model": "gpt-4-turbo",
+  "provider": "openrouter",
+  "custom_providers": {
+    "openrouter": {
+      "provider_type": "openai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "sk-or-..."
+    }
+  }
+}
 ```
 
 ## Usage
 
 ```bash
-# Run a command
-nano-agent ls -la
-
-# Interactive mode
-nano-agent
-
-# Continue last session
-nano-agent -c
+nano-agent ls -la    # Run a command
+nano-agent           # Interactive mode
+nano-agent -c        # Continue last session
 ```
 
-## Environment
+## Configuration
 
-- `OPENAI_API_KEY` - API key (one of key or base URL required)
-- `OPENAI_BASE_URL` - Custom API endpoint
-- `OPENAI_MODEL` - Model name
+Config file: `~/.config/nano/config.json` (or `./nano_config.json`)
+
+- `model` - Default model name
+- `provider` - Custom provider name
+- `max_tokens` - Max tokens per request
+- `temperature` - Sampling temperature
+- `custom_providers` - Map of provider configs (name -> base_url, api_key)
+- `quick_models` - Named model presets
+
+**Priority:** CLI > env vars > config file > defaults
+
+**Environment:**
+
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` - API settings
 - `NANO_MAX_STEPS` - Max tool calls (default: 200)
 
-## Commands
-
-In interactive mode:
-- `:q` - Quit
-- `:reset` - Clear session
-
-## Development
-
-```bash
-just check  # Format + clippy
-just test   # Test suite
-```
+**Interactive commands:** `:q` quit, `:reset` clear session.

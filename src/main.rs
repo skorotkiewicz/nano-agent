@@ -1,5 +1,5 @@
 use dirs::home_dir;
-use nano_agent::sandbox::Sandbox;
+use nano_agent::{config::Config, sandbox::Sandbox};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -22,10 +22,15 @@ const SKIP_DIRS: &[&str] = &[
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
 static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
+static CONFIG: OnceLock<Config> = OnceLock::new();
 static MODEL: OnceLock<String> = OnceLock::new();
 static MAX_STEPS: OnceLock<usize> = OnceLock::new();
 static SESSIONS_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SYSTEM: OnceLock<String> = OnceLock::new();
+
+fn get_config() -> &'static Config {
+    CONFIG.get_or_init(Config::load)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ApiFormat {
@@ -38,6 +43,9 @@ fn is_tty() -> bool {
 }
 
 fn get_model() -> &'static str {
+    if let Some(model) = get_config().get_model() {
+        return model;
+    }
     MODEL.get_or_init(|| env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string()))
 }
 
@@ -55,25 +63,39 @@ fn sessions_path() -> &'static PathBuf {
 }
 
 fn check_api_key() {
-    let key = env::var("OPENAI_API_KEY").unwrap_or_default();
-    let base = env::var("OPENAI_BASE_URL").unwrap_or_default();
-    if key.is_empty() && base.is_empty() {
-        eprintln!("set OPENAI_API_KEY or OPENAI_BASE_URL");
+    let (_, _, key) = get_api_config();
+    let env_key = env::var("OPENAI_API_KEY").unwrap_or_default();
+    if key.is_empty() && env_key.is_empty() {
+        eprintln!("set OPENAI_API_KEY or configure a provider in config.json");
         std::process::exit(1);
     }
 }
 
-fn get_api_config() -> (String, ApiFormat) {
+fn get_api_config() -> (String, ApiFormat, String) {
+    // Check custom providers first
+    if let Some(provider_name) = get_config().get_provider()
+        && let Some(custom) = get_config().get_custom_provider(provider_name)
+    {
+        let base = custom.base_url.trim_end_matches('/');
+        return (
+            format!("{}/chat/completions", base),
+            ApiFormat::ChatCompletions,
+            custom.api_key.clone().unwrap_or_default(),
+        );
+    }
+
     if let Ok(base) = env::var("OPENAI_BASE_URL") {
         let base = base.trim_end_matches('/');
         (
             format!("{}/chat/completions", base),
             ApiFormat::ChatCompletions,
+            env::var("OPENAI_API_KEY").unwrap_or_default(),
         )
     } else {
         (
             "https://api.openai.com/v1/responses".to_string(),
             ApiFormat::Responses,
+            env::var("OPENAI_API_KEY").unwrap_or_default(),
         )
     }
 }
@@ -473,9 +495,9 @@ async fn execute_shell(args: &serde_json::Value) -> String {
 async fn respond_api(
     client: &Client,
     body: serde_json::Value,
+    api_key: &str,
 ) -> Result<serde_json::Value, reqwest::Error> {
-    let (url, _) = get_api_config();
-    let key = env::var("OPENAI_API_KEY").unwrap_or_default();
+    let (url, _, _) = get_api_config();
 
     let (tx, mut rx) = tokio::sync::watch::channel(false);
     let spinner_handle = if is_tty() {
@@ -503,8 +525,8 @@ async fn respond_api(
 
     let mut req = client.post(&url).header("Content-Type", "application/json");
 
-    if !key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", key));
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
     }
 
     let res = req.json(&body).send().await?.json().await;
@@ -532,7 +554,8 @@ async fn respond_responses(
     if let Some(prev) = previous {
         body["previous_response_id"] = serde_json::Value::String(prev.to_string());
     }
-    respond_api(client, body).await
+    let (_, _, api_key) = get_api_config();
+    respond_api(client, body, &api_key).await
 }
 
 fn text(response: &serde_json::Value) -> String {
@@ -671,7 +694,8 @@ async fn respond_chat(
         "messages": messages,
         "tools": [{"type": "function", "function": get_tool_chat()}]
     });
-    respond_api(client, body).await
+    let (_, _, api_key) = get_api_config();
+    respond_api(client, body, &api_key).await
 }
 
 async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_json::Value {
@@ -920,7 +944,7 @@ async fn main() {
     }
     let prompt = args.join(" ");
 
-    let (_, format) = get_api_config();
+    let (_, format, _) = get_api_config();
 
     let mut state = match format {
         ApiFormat::Responses => SessionState::Responses { previous: None },

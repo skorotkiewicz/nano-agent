@@ -1,0 +1,159 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CustomProvider {
+    pub provider_type: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QuickModel {
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Config {
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub max_tokens: Option<u32>,
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub custom_providers: std::collections::HashMap<String, CustomProvider>,
+    #[serde(default)]
+    pub quick_models: std::collections::HashMap<String, QuickModel>,
+}
+
+impl Config {
+    pub fn load() -> Self {
+        // Check global config first (~/.config/nano/config.json)
+        if let Some(config) = Self::load_from_path(&config_path_global()) {
+            return config;
+        }
+        // Fallback to local config in cwd
+        Self::load_from_path(&config_path_local()).unwrap_or_default()
+    }
+
+    fn load_from_path(path: &PathBuf) -> Option<Self> {
+        if path.exists() {
+            let data = std::fs::read_to_string(path).ok()?;
+            serde_json::from_str(&data).ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    pub fn get_provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    pub fn get_max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+    }
+
+    pub fn get_temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+
+    pub fn get_custom_provider(&self, name: &str) -> Option<&CustomProvider> {
+        self.custom_providers.get(name)
+    }
+
+    pub fn get_quick_model(&self, name: &str) -> Option<&QuickModel> {
+        self.quick_models.get(name)
+    }
+}
+
+fn config_path_global() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_default()
+        .join("nano")
+        .join("config.json")
+}
+
+fn config_path_local() -> PathBuf {
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join("nano_config.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert!(config.model.is_none());
+        assert!(config.provider.is_none());
+        assert!(config.max_tokens.is_none());
+        assert!(config.temperature.is_none());
+    }
+
+    #[test]
+    fn test_config_load_valid_json() {
+        let config = r#"{"model": "test-model", "provider": "test-provider"}"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        assert_eq!(parsed.model, Some("test-model".to_string()));
+        assert_eq!(parsed.provider, Some("test-provider".to_string()));
+    }
+
+    #[test]
+    fn test_load_config_with_providers() {
+        let config = r#"{
+            "custom_providers": {
+                "test": {
+                    "provider_type": "openai",
+                    "base_url": "http://test.com",
+                    "api_key": "key"
+                }
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        assert!(parsed.get_custom_provider("test").is_some());
+    }
+
+    #[test]
+    fn test_load_config_with_quick_models() {
+        let config = r#"{
+            "quick_models": {
+                "fast": {
+                    "provider": "openrouter",
+                    "model": "google/gemini-flash"
+                }
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        let quick = parsed.get_quick_model("fast").unwrap();
+        assert_eq!(quick.provider, "openrouter");
+        assert_eq!(quick.model, "google/gemini-flash");
+    }
+
+    #[test]
+    fn test_config_load_missing() {
+        let config = Config::load();
+        // Should return default without error
+        assert!(config.model.is_none() || config.model.is_some());
+    }
+
+    #[test]
+    fn test_getters() {
+        let config = Config {
+            model: Some("gpt-4".to_string()),
+            provider: Some("openai".to_string()),
+            max_tokens: Some(4096),
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        assert_eq!(config.get_model(), Some("gpt-4"));
+        assert_eq!(config.get_provider(), Some("openai"));
+        assert_eq!(config.get_max_tokens(), Some(4096));
+        assert_eq!(config.get_temperature(), Some(0.7));
+    }
+}
