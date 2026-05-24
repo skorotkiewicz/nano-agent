@@ -496,6 +496,49 @@ async fn execute_shell(args: &serde_json::Value) -> String {
     }
 }
 
+fn parse_tool_args(args_str: &str) -> Result<serde_json::Value, String> {
+    serde_json::from_str(args_str).map_err(|e| format!("bad arguments: {}", e))
+}
+
+async fn execute_shell_tool(args: &serde_json::Value) -> String {
+    let desc = args
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
+    let words = desc.split_whitespace().count();
+    if !(5..=10).contains(&words) {
+        return "bad arguments: description must be 5-10 words".to_string();
+    }
+
+    let args_clone = args.clone();
+    let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
+        .await
+        .unwrap_or(false);
+    if approved {
+        execute_shell(args).await
+    } else {
+        color("31", "denied by user")
+    }
+}
+
+async fn dispatch_tool_call(name: &str, args_str: &str) -> String {
+    let args = match parse_tool_args(args_str) {
+        Ok(args) => args,
+        Err(e) => return e,
+    };
+
+    if get_mcp_client().has_tool(name).await {
+        get_mcp_client()
+            .call_tool(name, args)
+            .await
+            .unwrap_or_else(|e| e)
+    } else if name == "execute_shell" {
+        execute_shell_tool(&args).await
+    } else {
+        "unknown tool".to_string()
+    }
+}
+
 // --- API Interaction ---
 async fn respond_api(
     client: &Client,
@@ -591,64 +634,11 @@ async fn tool_output_responses(call: &serde_json::Value) -> serde_json::Value {
         .unwrap_or("")
         .to_string();
     let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
-
-    let result = if get_mcp_client().has_tool(name).await {
-        let args_str = call
-            .get("arguments")
-            .and_then(|a| a.as_str())
-            .unwrap_or("{}");
-        let args: serde_json::Value = serde_json::from_str(args_str)
-            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
-
-        if args.get("error").is_some() {
-            args.get("error")
-                .unwrap()
-                .as_str()
-                .unwrap_or("bad arguments")
-                .to_string()
-        } else {
-            get_mcp_client()
-                .call_tool(name, args)
-                .await
-                .unwrap_or_else(|e| e)
-        }
-    } else if name == "execute_shell" {
-        let args_str = call
-            .get("arguments")
-            .and_then(|a| a.as_str())
-            .unwrap_or("{}");
-        let args: serde_json::Value = serde_json::from_str(args_str)
-            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
-
-        if args.get("error").is_some() {
-            args.get("error")
-                .unwrap()
-                .as_str()
-                .unwrap_or("bad arguments")
-                .to_string()
-        } else {
-            let desc = args
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            let words = desc.split_whitespace().count();
-            if !(5..=10).contains(&words) {
-                "bad arguments: description must be 5-10 words".to_string()
-            } else {
-                let args_clone = args.clone();
-                let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
-                    .await
-                    .unwrap_or(false);
-                if approved {
-                    execute_shell(&args).await
-                } else {
-                    color("31", "denied by user")
-                }
-            }
-        }
-    } else {
-        "unknown tool".to_string()
-    };
+    let args_str = call
+        .get("arguments")
+        .and_then(|a| a.as_str())
+        .unwrap_or("{}");
+    let result = dispatch_tool_call(name, args_str).await;
 
     serde_json::json!({
         "type": "function_call_output",
@@ -731,55 +721,7 @@ async fn respond_chat(
 }
 
 async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_json::Value {
-    let result = if get_mcp_client().has_tool(name).await {
-        let args: serde_json::Value = serde_json::from_str(args_str)
-            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
-
-        if args.get("error").is_some() {
-            args.get("error")
-                .unwrap()
-                .as_str()
-                .unwrap_or("bad arguments")
-                .to_string()
-        } else {
-            get_mcp_client()
-                .call_tool(name, args)
-                .await
-                .unwrap_or_else(|e| e)
-        }
-    } else if name == "execute_shell" {
-        let args: serde_json::Value = serde_json::from_str(args_str)
-            .unwrap_or_else(|e| serde_json::json!({"error": format!("bad arguments: {}", e)}));
-
-        if args.get("error").is_some() {
-            args.get("error")
-                .unwrap()
-                .as_str()
-                .unwrap_or("bad arguments")
-                .to_string()
-        } else {
-            let desc = args
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            let words = desc.split_whitespace().count();
-            if !(5..=10).contains(&words) {
-                "bad arguments: description must be 5-10 words".to_string()
-            } else {
-                let args_clone = args.clone();
-                let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
-                    .await
-                    .unwrap_or(false);
-                if approved {
-                    execute_shell(&args).await
-                } else {
-                    color("31", "denied by user")
-                }
-            }
-        }
-    } else {
-        "unknown tool".to_string()
-    };
+    let result = dispatch_tool_call(name, args_str).await;
 
     serde_json::json!({
         "role": "tool",
