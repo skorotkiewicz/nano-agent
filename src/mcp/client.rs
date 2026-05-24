@@ -53,17 +53,16 @@ impl McpClient {
             return;
         }
 
-        eprintln!("(mcp: 0/{}) servers", total);
-
         let mut connected = 0;
         for (name, server_config) in &config.mcp_servers {
+            eprintln!("\rconnecting... {}/{}", connected + 1, total);
             match McpServerHandle::connect(CompactString::new(name.clone()), server_config).await {
                 Ok(mut server) => match server.list_tools().await {
                     Ok(tools) => {
                         self.tools.lock().await.extend(tools.clone());
                         self.servers.lock().await.insert(name.clone(), server);
                         connected += 1;
-                        eprintln!("\r(mcp: {}/{}) servers", connected, total);
+                        // eprintln!("\r(mcp: {}/{}) servers", connected, total);
                     }
                     Err(e) => {
                         eprintln!("\n[WARN] MCP server '{}' failed to initialize: {}", name, e);
@@ -164,6 +163,7 @@ impl McpClient {
                 let mut server =
                     McpServerHandle::connect(CompactString::new(server_name.clone()), &config)
                         .await?;
+                eprintln!("connecting...");
                 server.list_tools().await?; // Initialize tools
                 servers.insert(server_name.clone(), server);
             }
