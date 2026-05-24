@@ -32,5 +32,21 @@
         "CONTEXT7_API_KEY": "ctx7sk-"
       }
     }
+  },
+  "acp": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8643,
+    "agent_name": "nano",
+    "description": "Nano local shell agent",
+    "api_key": "optional-server-token",
+    "agents": {
+      "remote-coder": {
+        "endpoint": "http://localhost:8644",
+        "agent_name": "coder",
+        "timeout": 120,
+        "api_key": "optional-remote-token"
+      }
+    }
   }
 }

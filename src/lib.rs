@@ -1,7 +1,12 @@
+pub mod acp;
 pub mod config;
 pub mod mcp;
 pub mod sandbox;
 
+pub use acp::{
+    AcpAgent, AcpClient, AcpError, AcpEvent, AcpServer, AgentManifest, Message, MessagePart, Run,
+    RunCreateRequest, RunMode, RunStatus,
+};
 pub use config::Config;
 pub use mcp::{McpClient, McpServerHandle, McpTool};
 pub use sandbox::Sandbox;
@@ -40,5 +45,21 @@ mod mcp_tests {
         let client = McpClient::new();
         // Should not panic
         let _ = client;
+    }
+
+    #[test]
+    fn test_acp_text_run_request() {
+        let request = RunCreateRequest::new_text("nano", "inspect src");
+        assert_eq!(request.agent_name, "nano");
+        assert_eq!(request.prompt_text(), "inspect src");
+        assert_eq!(request.mode, RunMode::Sync);
+    }
+
+    #[test]
+    fn test_acp_run_completion_output_text() {
+        let mut run = Run::new("nano", "run-1");
+        run.complete("done");
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.output_text(), "done");
     }
 }

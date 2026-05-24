@@ -1,26 +1,53 @@
 # Nano Agent
 
-A minimal shell agent for running commands with approval dialogs.
+A minimal command-line agent for working in a shell with approval dialogs.
+
+## Quick Start
+
+```bash
+export OPENAI_API_KEY=sk-...
+cargo run -- "summarize this repo"
+```
+
+Nano shows each shell command before it runs. Approve one command, approve all,
+or deny it.
 
 ## Install
 
 ```bash
 cargo install --path .
+nano-agent "find TODO comments"
 ```
 
-## Setup
-
-Set your OpenAI API key:
+## Use
 
 ```bash
-export OPENAI_API_KEY=sk-...
+nano-agent "list large files"   # One-shot prompt
+nano-agent                      # Interactive mode
+nano-agent -c                   # Continue last session
+nano-agent -s                   # Pick a recent session
 ```
 
-Or create `~/.config/nano/config.json`:
+Interactive commands:
+
+```text
+:q       quit
+:reset   clear the current session
+```
+
+## Configure
+
+Config is loaded from `~/.config/nano/config.json`, then `./nano_config.json`
+if the global file is missing.
+
+No config is required for OpenAI. Set `OPENAI_API_KEY` and optionally
+`OPENAI_MODEL`.
+
+Use a config file for custom OpenAI-compatible providers:
 
 ```json
 {
-  "model": "gpt-4-turbo",
+  "model": "gpt-5.5",
   "provider": "openrouter",
   "custom_providers": {
     "openrouter": {
@@ -32,30 +59,98 @@ Or create `~/.config/nano/config.json`:
 }
 ```
 
-## Usage
+Useful fields:
+
+- `model` - model name
+- `provider` - custom provider name
+- `max_tokens` - response token limit
+- `temperature` - sampling temperature
+- `custom_providers` - OpenAI-compatible providers
+- `quick_models` - named model presets
+- `mcp_servers` - MCP servers exposed as tools
+- `acp` - ACP server and delegation settings
+
+Environment:
 
 ```bash
-nano-agent ls -la    # Run a command
-nano-agent           # Interactive mode
-nano-agent -c        # Continue last session
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=http://localhost:1234/v1
+OPENAI_MODEL=gpt-5.5
+NANO_MAX_STEPS=200
+NANO_SANDBOX=0
 ```
 
-## Configuration
+## MCP
 
-Config file: `~/.config/nano/config.json` (or `./nano_config.json`)
+Configured MCP servers are loaded as agent tools.
 
-- `model` - Default model name
-- `provider` - Custom provider name
-- `max_tokens` - Max tokens per request
-- `temperature` - Sampling temperature
-- `custom_providers` - Map of provider configs (name -> base_url, api_key)
-- `quick_models` - Named model presets
+```json
+{
+  "mcp_servers": {
+    "docs": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "AUTHORIZATION": "Bearer ..."
+      }
+    },
+    "local": {
+      "command": "uvx",
+      "args": ["some-mcp-server"]
+    }
+  }
+}
+```
 
-**Priority:** CLI > env vars > config file > defaults
+Tools are discovered on startup and connected lazily when possible.
 
-**Environment:**
+## ACP
 
-- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` - API settings
-- `NANO_MAX_STEPS` - Max tool calls (default: 200)
+Nano can expose itself as an ACP agent and delegate work to other ACP agents.
 
-**Interactive commands:** `:q` quit, `:reset` clear session.
+Enable the server:
+
+```json
+{
+  "acp": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8643,
+    "agent_name": "nano",
+    "description": "Nano local shell agent",
+    "agents": {
+      "remote-coder": {
+        "endpoint": "http://localhost:8644",
+        "agent_name": "coder",
+        "timeout": 120
+      }
+    }
+  }
+}
+```
+
+Then start Nano:
+
+```bash
+nano-agent
+```
+
+Endpoints:
+
+- `GET /ping`
+- `GET /agents`
+- `GET /agents/{name}`
+- `POST /runs`
+- `GET /runs/{run_id}`
+- `GET /runs/{run_id}/events`
+- `POST /runs/{run_id}/cancel`
+
+Run a sync task:
+
+```bash
+curl -X POST http://127.0.0.1:8643/runs \
+  -H "Content-Type: application/json" \
+  -d '{"agent_name":"nano","mode":"sync","input":[{"role":"user","parts":[{"content_type":"text/plain","content":"find TODO comments in src"}]}]}'
+```
+
+Use `mode: "stream"` for `text/event-stream`. If `acp.api_key` is set,
+include `Authorization: Bearer <token>`.

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -28,6 +29,83 @@ pub struct McpServerConfig {
     pub headers: std::collections::HashMap<String, String>,
 }
 
+fn default_acp_timeout() -> u64 {
+    60
+}
+
+fn default_acp_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_acp_port() -> u16 {
+    8643
+}
+
+fn default_acp_agent_name() -> String {
+    "nano".to_string()
+}
+
+fn default_acp_description() -> String {
+    "Nano local shell agent".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpAgentConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_acp_timeout")]
+    pub timeout: u64,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+impl Default for AcpAgentConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            agent_name: None,
+            api_key: None,
+            timeout: default_acp_timeout(),
+            headers: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_acp_host")]
+    pub host: String,
+    #[serde(default = "default_acp_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_acp_agent_name")]
+    pub agent_name: String,
+    #[serde(default = "default_acp_description")]
+    pub description: String,
+    #[serde(default)]
+    pub agents: HashMap<String, AcpAgentConfig>,
+}
+
+impl Default for AcpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_acp_host(),
+            port: default_acp_port(),
+            api_key: None,
+            agent_name: default_acp_agent_name(),
+            description: default_acp_description(),
+            agents: HashMap::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     pub model: Option<String>,
@@ -40,6 +118,8 @@ pub struct Config {
     pub quick_models: std::collections::HashMap<String, QuickModel>,
     #[serde(default)]
     pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
+    #[serde(default)]
+    pub acp: AcpConfig,
 }
 
 impl Config {
@@ -219,5 +299,36 @@ mod tests {
         assert!(server.url.is_some());
         assert_eq!(server.url.as_ref().unwrap(), "https://mcp.context7.com/mcp");
         assert!(server.headers.contains_key("CONTEXT7_API_KEY"));
+    }
+
+    #[test]
+    fn test_acp_config_defaults() {
+        let parsed: Config = serde_json::from_str("{}").unwrap();
+        assert!(!parsed.acp.enabled);
+        assert_eq!(parsed.acp.host, "127.0.0.1");
+        assert_eq!(parsed.acp.port, 8643);
+        assert_eq!(parsed.acp.agent_name, "nano");
+    }
+
+    #[test]
+    fn test_load_config_with_acp_agent() {
+        let config = r#"{
+            "acp": {
+                "enabled": true,
+                "agents": {
+                    "coder": {
+                        "endpoint": "http://localhost:8644",
+                        "agent_name": "nano-coder",
+                        "timeout": 120
+                    }
+                }
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        let agent = parsed.acp.agents.get("coder").unwrap();
+        assert!(parsed.acp.enabled);
+        assert_eq!(agent.endpoint, "http://localhost:8644");
+        assert_eq!(agent.agent_name.as_deref(), Some("nano-coder"));
+        assert_eq!(agent.timeout, 120);
     }
 }
