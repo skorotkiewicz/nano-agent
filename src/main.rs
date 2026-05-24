@@ -11,7 +11,14 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, timeout};
 
 // --- Constants & Globals ---
-const SKIP_DIRS: &[&str] = &[".git", ".venv", "__pycache__", "node_modules", "venv"];
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+    "target",
+];
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
 static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
@@ -442,24 +449,8 @@ async fn execute_shell(args: &serde_json::Value) -> String {
     cmd.stdout(std::process::Stdio::piped());
 
     let output_result = timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
-    // let output_result = timeout(Duration::from_secs(timeout_secs), async {
-    //     if let Some(sb) = sandbox {
-    //         sb.wrap_command(&args.command)
-    //             .current_dir(cwd)
-    //             .output()
-    //             .await
-    //     } else {
-    //         tokio::process::Command::new("sh")
-    //             .arg("-c")
-    //             .arg(&args.command)
-    //             .current_dir(cwd)
-    //             .output()
-    //             .await
-    //     }
-    // })
-    // .await;
 
-      match output_result {
+    match output_result {
         Ok(Ok(output)) => {
             let mut res = format!(
                 "$ {}\nexit {}\n",
