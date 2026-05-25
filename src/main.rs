@@ -973,29 +973,66 @@ fn start_acp_server(client: Client) {
     });
 }
 
+fn repl_line_text(line: &str) -> (&str, bool) {
+    let trimmed = line.trim_end();
+    if let Some(text) = trimmed.strip_suffix('\\') {
+        (text.trim_end(), true)
+    } else {
+        (line, false)
+    }
+}
+
+async fn read_repl_input<R>(lines: &mut tokio::io::Lines<R>) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let mut input = String::new();
+    let mut continuation = false;
+
+    loop {
+        let prompt = if continuation { "... >" } else { "you >" };
+        eprint!("{} ", color("36", prompt));
+        let _ = io::stderr().flush();
+
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            _ => {
+                eprintln!();
+                return None;
+            }
+        };
+
+        let (text, continues) = repl_line_text(&line);
+        if !input.is_empty() {
+            input.push('\n');
+        }
+        input.push_str(text);
+
+        if continues {
+            continuation = true;
+            continue;
+        }
+
+        return Some(input.trim().to_string());
+    }
+}
+
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
     eprintln!(
         "{} repl {} mcp: {}",
         color("1", "nano"),
-        color("90", "(:q quit, :reset reset)"),
+        color("90", "(:q quit, :reset reset, end with \\ for multiline)"),
         color("90", &get_mcp_client().status())
     );
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
     loop {
-        eprint!("{} ", color("36", "nano >"));
-        let _ = io::stderr().flush();
-
-        let prompt = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            _ => {
-                eprintln!();
-                return;
-            }
+        let prompt = match read_repl_input(&mut lines).await {
+            Some(prompt) => prompt,
+            None => return,
         };
 
-        let prompt = prompt.trim().to_string();
         if prompt.is_empty() {
             continue;
         }
@@ -1133,5 +1170,16 @@ async fn main() {
         println!("{}", answer);
     } else {
         repl(&client, state, label).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repl_line_text;
+
+    #[test]
+    fn repl_line_text_detects_continuation() {
+        assert_eq!(repl_line_text("first line \\"), ("first line", true));
+        assert_eq!(repl_line_text("plain text"), ("plain text", false));
     }
 }

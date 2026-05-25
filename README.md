@@ -35,6 +35,8 @@ Interactive commands:
 :reset   clear the current session
 ```
 
+End a line with `\` to continue a multi-line prompt.
+
 ## Configure
 
 Config is loaded from `~/.config/nano/config.json`, then `./nano_config.json`
