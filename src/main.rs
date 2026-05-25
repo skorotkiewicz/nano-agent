@@ -1,4 +1,7 @@
+mod input;
+
 use dirs::home_dir;
+use input::read_repl_input;
 use nano_agent::{
     acp::{AcpClient, AcpServer, AgentManifest},
     config::Config,
@@ -973,50 +976,6 @@ fn start_acp_server(client: Client) {
     });
 }
 
-fn repl_line_text(line: &str) -> (&str, bool) {
-    let trimmed = line.trim_end();
-    if let Some(text) = trimmed.strip_suffix('\\') {
-        (text.trim_end(), true)
-    } else {
-        (line, false)
-    }
-}
-
-async fn read_repl_input<R>(lines: &mut tokio::io::Lines<R>) -> Option<String>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    let mut input = String::new();
-    let mut continuation = false;
-
-    loop {
-        let prompt = if continuation { "... >" } else { "you >" };
-        eprint!("{} ", color("36", prompt));
-        let _ = io::stderr().flush();
-
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            _ => {
-                eprintln!();
-                return None;
-            }
-        };
-
-        let (text, continues) = repl_line_text(&line);
-        if !input.is_empty() {
-            input.push('\n');
-        }
-        input.push_str(text);
-
-        if continues {
-            continuation = true;
-            continue;
-        }
-
-        return Some(input.trim().to_string());
-    }
-}
-
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
     eprintln!(
         "{} repl {} mcp: {}",
@@ -1170,16 +1129,5 @@ async fn main() {
         println!("{}", answer);
     } else {
         repl(&client, state, label).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::repl_line_text;
-
-    #[test]
-    fn repl_line_text_detects_continuation() {
-        assert_eq!(repl_line_text("first line \\"), ("first line", true));
-        assert_eq!(repl_line_text("plain text"), ("plain text", false));
     }
 }
