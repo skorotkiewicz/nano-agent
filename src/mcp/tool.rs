@@ -7,6 +7,8 @@ pub struct McpTool {
     pub description: String,
     pub parameters: Value,
     pub server_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
 }
 
 impl McpTool {
@@ -16,7 +18,12 @@ impl McpTool {
             description,
             parameters,
             server_name,
+            original_name: None,
         }
+    }
+
+    pub fn call_name(&self) -> &str {
+        self.original_name.as_deref().unwrap_or(&self.name)
     }
 
     pub fn to_tool_schema(&self) -> Value {

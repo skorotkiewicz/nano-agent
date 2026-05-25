@@ -1,20 +1,31 @@
+use crate::config::{Config, McpServerConfig};
 use crate::mcp::McpTool;
 use compact_str::CompactString;
-use serde_json::Value;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-// use crate::mcp::server::McpServerHandle;
 use super::server::McpServerHandle;
+
+const MCP_CACHE_VERSION: u8 = 1;
+const RESERVED_TOOL_NAMES: &[&str] = &["execute_shell", "delegate_task"];
+
+#[derive(Debug, Serialize, Deserialize)]
+struct McpToolCache {
+    version: u8,
+    fingerprint: String,
+    tools: Vec<McpTool>,
+}
 
 pub struct McpClient {
     servers: Arc<Mutex<HashMap<String, McpServerHandle>>>,
     tools: Arc<Mutex<Vec<McpTool>>>,
     cache_path: PathBuf,
     total_servers: Arc<Mutex<usize>>,
-    server_configs: Arc<Mutex<HashMap<String, crate::config::McpServerConfig>>>,
+    server_configs: Arc<Mutex<HashMap<String, McpServerConfig>>>,
 }
 
 impl McpClient {
@@ -33,36 +44,36 @@ impl McpClient {
         }
     }
 
-    pub async fn load_servers(&self, config: &crate::config::Config) {
+    pub async fn load_servers(&self, config: &Config) {
         *self.total_servers.lock().await = config.mcp_servers.len();
         let total = *self.total_servers.lock().await;
+        let fingerprint = mcp_cache_fingerprint(config);
 
-        // Store server configs for lazy connection
         {
             let mut configs = self.server_configs.lock().await;
+            configs.clear();
             for (name, server_config) in &config.mcp_servers {
                 configs.insert(name.clone(), server_config.clone());
             }
         }
+        self.tools.lock().await.clear();
+        self.servers.lock().await.clear();
 
-        // Try loading from cache first
-        if let Some(cached_tools) = Self::load_from_cache(&self.cache_path).await
-            && self.is_cache_valid(config).await
-        {
+        if let Some(cached_tools) = Self::load_from_cache(&self.cache_path, &fingerprint).await {
             self.tools.lock().await.extend(cached_tools);
             return;
         }
 
         let mut connected = 0;
+        let mut loaded_tools = Vec::new();
         for (name, server_config) in &config.mcp_servers {
             eprintln!("\rconnecting... {}/{}", connected + 1, total);
             match McpServerHandle::connect(CompactString::new(name.clone()), server_config).await {
                 Ok(mut server) => match server.list_tools().await {
                     Ok(tools) => {
-                        self.tools.lock().await.extend(tools.clone());
+                        loaded_tools.extend(tools);
                         self.servers.lock().await.insert(name.clone(), server);
                         connected += 1;
-                        // eprintln!("\r(mcp: {}/{}) servers", connected, total);
                     }
                     Err(e) => {
                         eprintln!("\n[WARN] MCP server '{}' failed to initialize: {}", name, e);
@@ -74,7 +85,9 @@ impl McpClient {
             }
         }
 
-        self.save_to_cache().await;
+        disambiguate_tools(&mut loaded_tools);
+        *self.tools.lock().await = loaded_tools;
+        self.save_to_cache(&fingerprint).await;
     }
 
     pub fn status(&self) -> String {
@@ -83,44 +96,31 @@ impl McpClient {
         format!("(mcp: {}/{}) servers", connected, total)
     }
 
-    async fn load_from_cache(path: &PathBuf) -> Option<Vec<McpTool>> {
+    async fn load_from_cache(path: &PathBuf, fingerprint: &str) -> Option<Vec<McpTool>> {
         if !path.exists() {
             return None;
         }
         let data = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&data).ok()
+        let cache: McpToolCache = serde_json::from_str(&data).ok()?;
+        if cache.version == MCP_CACHE_VERSION && cache.fingerprint == fingerprint {
+            Some(cache.tools)
+        } else {
+            None
+        }
     }
 
-    async fn save_to_cache(&self) {
+    async fn save_to_cache(&self, fingerprint: &str) {
         let tools = self.tools.lock().await.clone();
-        if let Ok(data) = serde_json::to_string(&tools) {
+        let cache = McpToolCache {
+            version: MCP_CACHE_VERSION,
+            fingerprint: fingerprint.to_string(),
+            tools,
+        };
+        if let Ok(data) = serde_json::to_string(&cache) {
             if let Some(parent) = self.cache_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::write(&self.cache_path, data);
-        }
-    }
-
-    async fn is_cache_valid(&self, _config: &crate::config::Config) -> bool {
-        if !self.cache_path.exists() {
-            return false;
-        }
-
-        let cache_modified = self.cache_path.metadata().and_then(|m| m.modified()).ok();
-
-        if let Some(cache_time) = cache_modified {
-            let config_path = std::env::current_dir()
-                .unwrap_or_default()
-                .join("nano_config.json");
-            if config_path.exists()
-                && let Ok(config_modified) = config_path.metadata().and_then(|m| m.modified())
-                && config_modified > cache_time
-            {
-                return false;
-            }
-            true
-        } else {
-            false
         }
     }
 
@@ -138,22 +138,22 @@ impl McpClient {
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
-        let (server_name, config) = {
+        let (server_name, config, call_name) = {
             let tools = self.tools.lock().await;
             let tool = tools
                 .iter()
                 .find(|t| t.name == name)
                 .ok_or_else(|| "tool not found".to_string())?;
-            let name = tool.server_name.clone();
+            let server_name = tool.server_name.clone();
+            let call_name = tool.call_name().to_string();
             drop(tools);
 
-            // Get config for this server
             let configs = self.server_configs.lock().await;
             let config = configs
-                .get(&name)
+                .get(&server_name)
                 .cloned()
                 .ok_or_else(|| "server config not found".to_string())?;
-            (name, config)
+            (server_name, config, call_name)
         };
 
         // Check if already connected, if not connect lazily
@@ -174,12 +174,195 @@ impl McpClient {
             .get_mut(&server_name)
             .ok_or_else(|| "server not found".to_string())?;
 
-        server.call_tool(name, args).await
+        server.call_tool(&call_name, args).await
     }
 }
 
 impl Default for McpClient {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut pairs = map
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    pairs
+}
+
+fn mcp_cache_fingerprint(config: &Config) -> String {
+    let mut names = config.mcp_servers.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+
+    let servers = names
+        .into_iter()
+        .filter_map(|name| {
+            let server = config.mcp_servers.get(&name)?;
+            Some(json!({
+                "name": name,
+                "command": server.command,
+                "args": server.args,
+                "env": sorted_pairs(&server.env),
+                "url": server.url,
+                "headers": sorted_pairs(&server.headers),
+                "show_logs": server.show_logs,
+            }))
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string(&servers).unwrap_or_default()
+}
+
+fn sanitize_tool_name_part(input: &str) -> String {
+    let sanitized = input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        "mcp".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn disambiguate_tools(tools: &mut [McpTool]) {
+    let mut counts = HashMap::new();
+    for tool in tools.iter() {
+        *counts.entry(tool.name.clone()).or_insert(0usize) += 1;
+    }
+
+    let mut used = RESERVED_TOOL_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<HashSet<_>>();
+    used.extend(
+        tools
+            .iter()
+            .filter(|tool| {
+                counts.get(&tool.name).copied().unwrap_or(0) == 1
+                    && !RESERVED_TOOL_NAMES.contains(&tool.name.as_str())
+            })
+            .map(|tool| tool.name.clone()),
+    );
+
+    for tool in tools.iter_mut() {
+        let should_disambiguate = counts.get(&tool.name).copied().unwrap_or(0) > 1
+            || RESERVED_TOOL_NAMES.contains(&tool.name.as_str());
+        if !should_disambiguate {
+            continue;
+        }
+
+        let original_name = tool.call_name().to_string();
+        let base = format!(
+            "{}__{}",
+            sanitize_tool_name_part(&tool.server_name),
+            sanitize_tool_name_part(&original_name)
+        );
+        let mut exposed_name = base.clone();
+        let mut suffix = 2;
+        while used.contains(&exposed_name) {
+            exposed_name = format!("{}__{}", base, suffix);
+            suffix += 1;
+        }
+
+        tool.name = exposed_name;
+        tool.original_name = Some(original_name);
+        used.insert(tool.name.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{disambiguate_tools, mcp_cache_fingerprint};
+    use crate::config::Config;
+    use crate::mcp::McpTool;
+
+    #[test]
+    fn cache_fingerprint_changes_when_mcp_config_changes() {
+        let first: Config = serde_json::from_str(
+            r#"{
+                "mcp_servers": {
+                    "docs": {
+                        "command": "uvx",
+                        "args": ["docs-server"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let second: Config = serde_json::from_str(
+            r#"{
+                "mcp_servers": {
+                    "docs": {
+                        "command": "uvx",
+                        "args": ["different-server"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_ne!(
+            mcp_cache_fingerprint(&first),
+            mcp_cache_fingerprint(&second)
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_names_are_disambiguated_but_call_original_name() {
+        let mut tools = vec![
+            McpTool::new(
+                "search".to_string(),
+                "Search docs".to_string(),
+                serde_json::json!({"type": "object"}),
+                "docs".to_string(),
+            ),
+            McpTool::new(
+                "search".to_string(),
+                "Search web".to_string(),
+                serde_json::json!({"type": "object"}),
+                "web".to_string(),
+            ),
+            McpTool::new(
+                "fetch".to_string(),
+                "Fetch docs".to_string(),
+                serde_json::json!({"type": "object"}),
+                "docs".to_string(),
+            ),
+        ];
+
+        disambiguate_tools(&mut tools);
+
+        assert_eq!(tools[0].name, "docs__search");
+        assert_eq!(tools[0].call_name(), "search");
+        assert_eq!(tools[1].name, "web__search");
+        assert_eq!(tools[1].call_name(), "search");
+        assert_eq!(tools[2].name, "fetch");
+        assert_eq!(tools[2].call_name(), "fetch");
+    }
+
+    #[test]
+    fn reserved_tool_names_are_disambiguated() {
+        let mut tools = vec![McpTool::new(
+            "execute_shell".to_string(),
+            "Remote shell".to_string(),
+            serde_json::json!({"type": "object"}),
+            "remote".to_string(),
+        )];
+
+        disambiguate_tools(&mut tools);
+
+        assert_eq!(tools[0].name, "remote__execute_shell");
+        assert_eq!(tools[0].call_name(), "execute_shell");
     }
 }

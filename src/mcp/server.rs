@@ -5,7 +5,7 @@ use rmcp::model::CallToolRequestParams;
 use rmcp::service::{Peer, RoleClient, RunningService, serve_client};
 use serde_json::Value;
 use std::collections::HashMap;
-// use std::process::Stdio;
+use std::process::Stdio;
 use tokio::process::Command;
 
 pub struct McpServerHandle {
@@ -45,9 +45,9 @@ impl McpServerHandle {
             for (key, val) in &config.env {
                 cmd.env(key, val);
             }
-            // if !config.show_logs {
-            //     cmd.stderr(Stdio::null());
-            // }
+            if !config.show_logs {
+                cmd.stderr(Stdio::null());
+            }
 
             let transport = rmcp::transport::TokioChildProcess::new(cmd)
                 .map_err(|e| format!("Failed to create transport: {}", e))?;
@@ -80,6 +80,7 @@ impl McpServerHandle {
             .into_iter()
             .map(|t| McpTool {
                 name: t.name.to_string(),
+                original_name: None,
                 description: t
                     .description
                     .as_ref()

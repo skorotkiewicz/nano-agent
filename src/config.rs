@@ -27,8 +27,8 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
-    // #[serde(default)]
-    // pub show_logs: bool,
+    #[serde(default)]
+    pub show_logs: bool,
 }
 
 fn default_acp_timeout() -> u64 {
@@ -282,7 +282,22 @@ mod tests {
         assert!(server.args.is_empty());
         assert!(server.env.is_empty());
         assert!(server.url.is_none());
-        // assert!(!server.show_logs);
+        assert!(!server.show_logs);
+    }
+
+    #[test]
+    fn test_mcp_server_config_show_logs() {
+        let config = r#"{
+            "mcp_servers": {
+                "local": {
+                    "command": "uvx",
+                    "show_logs": true
+                }
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        let server = parsed.mcp_servers.get("local").unwrap();
+        assert!(server.show_logs);
     }
 
     #[test]
