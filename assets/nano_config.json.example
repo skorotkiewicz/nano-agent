@@ -24,7 +24,8 @@
   "mcp_servers": {
     "semble": {
       "command": "uvx",
-      "args": ["--from", "semble[mcp]", "semble"]
+      "args": ["--from", "semble[mcp]", "semble"],
+      "show_logs": false
     },
     "context7": {
       "url": "https://mcp.context7.com/mcp",

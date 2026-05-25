@@ -95,13 +95,15 @@ Configured MCP servers are loaded as agent tools.
     },
     "local": {
       "command": "uvx",
-      "args": ["some-mcp-server"]
+      "args": ["some-mcp-server"],
+      "show_logs": true
     }
   }
 }
 ```
 
-Tools are discovered on startup and connected lazily when possible.
+Tools are discovered on startup and connected lazily when possible. Stdio MCP
+server logs are hidden by default; set `show_logs` to `true` while debugging.
 
 ## ACP
 

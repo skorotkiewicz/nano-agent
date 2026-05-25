@@ -27,6 +27,8 @@ pub struct McpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    // #[serde(default)]
+    // pub show_logs: bool,
 }
 
 fn default_acp_timeout() -> u64 {
@@ -280,6 +282,7 @@ mod tests {
         assert!(server.args.is_empty());
         assert!(server.env.is_empty());
         assert!(server.url.is_none());
+        // assert!(!server.show_logs);
     }
 
     #[test]
