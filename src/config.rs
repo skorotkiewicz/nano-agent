@@ -16,88 +16,40 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
+    pub env: HashMap<String, String>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
-    pub headers: std::collections::HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     #[serde(default)]
     pub show_logs: bool,
 }
 
-fn default_acp_timeout() -> u64 {
-    60
-}
-
-fn default_acp_host() -> String {
-    "127.0.0.1".to_string()
-}
-
-fn default_acp_port() -> u16 {
-    8643
-}
-
-fn default_acp_agent_name() -> String {
-    "nano".to_string()
-}
-
-fn default_acp_description() -> String {
-    "Nano local shell agent".to_string()
+fn default_acp_timeout_secs() -> u64 {
+    600
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpAgentConfig {
-    pub endpoint: String,
+    pub command: String,
     #[serde(default)]
-    pub agent_name: Option<String>,
+    pub args: Vec<String>,
     #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default = "default_acp_timeout")]
-    pub timeout: u64,
+    pub env: HashMap<String, String>,
     #[serde(default)]
-    pub headers: HashMap<String, String>,
+    pub working_directory: Option<String>,
+    #[serde(default = "default_acp_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 impl Default for AcpAgentConfig {
     fn default() -> Self {
         Self {
-            endpoint: String::new(),
-            agent_name: None,
-            api_key: None,
-            timeout: default_acp_timeout(),
-            headers: HashMap::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcpConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_acp_host")]
-    pub host: String,
-    #[serde(default = "default_acp_port")]
-    pub port: u16,
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default = "default_acp_agent_name")]
-    pub agent_name: String,
-    #[serde(default = "default_acp_description")]
-    pub description: String,
-    #[serde(default)]
-    pub agents: HashMap<String, AcpAgentConfig>,
-}
-
-impl Default for AcpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            host: default_acp_host(),
-            port: default_acp_port(),
-            api_key: None,
-            agent_name: default_acp_agent_name(),
-            description: default_acp_description(),
-            agents: HashMap::new(),
+            command: String::new(),
+            args: vec![],
+            env: HashMap::new(),
+            working_directory: None,
+            timeout_secs: default_acp_timeout_secs(),
         }
     }
 }
@@ -109,11 +61,11 @@ pub struct Config {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     #[serde(default)]
-    pub custom_providers: std::collections::HashMap<String, CustomProvider>,
+    pub custom_providers: HashMap<String, CustomProvider>,
     #[serde(default)]
-    pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
+    pub mcp_servers: HashMap<String, McpServerConfig>,
     #[serde(default)]
-    pub acp: AcpConfig,
+    pub acp_agents: HashMap<String, AcpAgentConfig>,
 }
 
 impl Config {
@@ -292,33 +244,22 @@ mod tests {
     }
 
     #[test]
-    fn test_acp_config_defaults() {
-        let parsed: Config = serde_json::from_str("{}").unwrap();
-        assert!(!parsed.acp.enabled);
-        assert_eq!(parsed.acp.host, "127.0.0.1");
-        assert_eq!(parsed.acp.port, 8643);
-        assert_eq!(parsed.acp.agent_name, "nano");
-    }
-
-    #[test]
-    fn test_load_config_with_acp_agent() {
+    fn test_load_config_with_acp_agents() {
         let config = r#"{
-            "acp": {
-                "enabled": true,
-                "agents": {
-                    "coder": {
-                        "endpoint": "http://localhost:8644",
-                        "agent_name": "nano-coder",
-                        "timeout": 120
-                    }
+            "acp_agents": {
+                "coder": {
+                    "command": "nano-agent",
+                    "args": ["--acp"],
+                    "working_directory": "/tmp/project",
+                    "timeout_secs": 120
                 }
             }
         }"#;
         let parsed: Config = serde_json::from_str(config).unwrap();
-        let agent = parsed.acp.agents.get("coder").unwrap();
-        assert!(parsed.acp.enabled);
-        assert_eq!(agent.endpoint, "http://localhost:8644");
-        assert_eq!(agent.agent_name.as_deref(), Some("nano-coder"));
-        assert_eq!(agent.timeout, 120);
+        let agent = parsed.acp_agents.get("coder").unwrap();
+        assert_eq!(agent.command, "nano-agent");
+        assert_eq!(agent.args, vec!["--acp"]);
+        assert_eq!(agent.working_directory.as_deref(), Some("/tmp/project"));
+        assert_eq!(agent.timeout_secs, 120);
     }
 }

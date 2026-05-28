@@ -1,12 +1,6 @@
 mod agent;
-mod client;
-mod message;
 mod server;
 
-pub use agent::AcpAgent;
-pub use client::AcpClient;
-pub use message::{
-    AcpError, AcpEvent, AcpSession, AgentManifest, AgentsListResponse, Message, MessagePart, Run,
-    RunCreateRequest, RunEventsListResponse, RunMode, RunResumeRequest, RunStatus, now_rfc3339,
-};
-pub use server::AcpServer;
+pub use crate::config::AcpAgentConfig;
+pub use agent::{AcpAgentManager, AgentTask, AgentTaskResult};
+pub use server::{AcpPrompt, AcpServer};

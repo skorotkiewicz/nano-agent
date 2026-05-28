@@ -8,6 +8,9 @@ default:
 build:
     cargo build --release
 
+build-all:
+    cargo build --release --all-features
+
 run *args:
     cargo run -- {{ args }}
 

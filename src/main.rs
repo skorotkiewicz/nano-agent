@@ -2,12 +2,9 @@ mod input;
 
 use dirs::home_dir;
 use input::read_repl_input;
-use nano_agent::{
-    acp::{AcpClient, AcpServer, AgentManifest},
-    config::Config,
-    mcp::McpClient,
-    sandbox::Sandbox,
-};
+#[cfg(feature = "acp")]
+use nano_agent::acp::{AcpAgentManager, AcpPrompt, AcpServer, AgentTask};
+use nano_agent::{config::Config, mcp::McpClient, sandbox::Sandbox};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -30,13 +27,15 @@ const SKIP_DIRS: &[&str] = &[
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
 static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
+static ACP_MODE: AtomicBool = AtomicBool::new(false);
 static CONFIG: OnceLock<Config> = OnceLock::new();
 static MODEL: OnceLock<String> = OnceLock::new();
 static MAX_STEPS: OnceLock<usize> = OnceLock::new();
 static SESSIONS_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SYSTEM: OnceLock<String> = OnceLock::new();
 static MCP_CLIENT: OnceLock<McpClient> = OnceLock::new();
-static ACP_CLIENT: OnceLock<AcpClient> = OnceLock::new();
+#[cfg(feature = "acp")]
+static ACP_MANAGER: OnceLock<AcpAgentManager> = OnceLock::new();
 
 fn get_config() -> &'static Config {
     CONFIG.get_or_init(Config::load)
@@ -46,8 +45,9 @@ fn get_mcp_client() -> &'static McpClient {
     MCP_CLIENT.get_or_init(McpClient::new)
 }
 
-fn get_acp_client() -> &'static AcpClient {
-    ACP_CLIENT.get_or_init(|| AcpClient::new(get_config()))
+#[cfg(feature = "acp")]
+fn get_acp_manager() -> &'static AcpAgentManager {
+    ACP_MANAGER.get_or_init(|| AcpAgentManager::from_config(get_config()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -320,6 +320,14 @@ fn get_system() -> &'static str {
             vec!["skill.md", "skills.md"],
             40,
         );
+        #[cfg(feature = "acp")]
+        let delegation = if !get_config().acp_agents.is_empty() {
+            " Use delegate_task or delegate_tasks to spawn configured ACP child agents for independent subtasks."
+        } else {
+            ""
+        };
+        #[cfg(not(feature = "acp"))]
+        let delegation = "";
 
         // "You are Nano, a shell agent. Use the execute_shell tool for ALL shell commands.\n\
         //  When user asks for shell commands, ALWAYS make a tool_call to execute_shell - never describe the command in text.\n\
@@ -327,9 +335,10 @@ fn get_system() -> &'static str {
         //  Be concise. No markdown. cwd: {}\n\
 
         format!(
-            "You are Nano, a general-purpose shell agent with one tool: execute_shell.\n\
+            "You are Nano, a general-purpose shell agent with a primary tool: execute_shell.\n\
              When user asks for shell commands, ALWAYS make a tool_call to execute_shell\n\
              Use it to inspect, edit, install, test, search, automate, and answer.\n\
+             {}\n\
              Be concise, tenacious, and relentlessly useful. Keep taking shell steps until done or blocked.\n\
              Output short plain-text snippets optimized for terminal reading; no markdown rendering or syntax highlighting.\n\
              Never run destructive commands unless explicitly requested.\n\
@@ -338,6 +347,7 @@ fn get_system() -> &'static str {
              shell: {}\n\
              Important docs (read as needed): {}\n\
              Important skill files (read as needed): {}",
+            delegation,
             cwd,
             env::consts::OS,
             env::var("SHELL").unwrap_or_default(),
@@ -391,48 +401,104 @@ fn get_tool_chat() -> &'static serde_json::Value {
     })
 }
 
-fn get_acp_delegate_tool_chat() -> serde_json::Value {
-    let agents = get_acp_client().list_agents();
-    let mut agent_property = serde_json::json!({
+#[cfg(feature = "acp")]
+fn acp_agent_property(agents: &[String]) -> serde_json::Value {
+    let mut property = serde_json::json!({
         "type": "string",
-        "description": "Configured ACP agent name."
+        "description": "Configured ACP child agent name."
     });
     if !agents.is_empty() {
-        agent_property["enum"] = serde_json::Value::Array(
+        property["enum"] = serde_json::Value::Array(
             agents
                 .iter()
                 .map(|agent| serde_json::Value::String(agent.clone()))
                 .collect(),
         );
     }
-
-    serde_json::json!({
-        "name": "delegate_task",
-        "description": "Delegate a task to a configured ACP agent.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "agent": agent_property,
-                "task": {
-                    "type": "string",
-                    "description": "The complete task to send to the ACP agent."
-                }
-            },
-            "required": ["agent", "task"],
-            "additionalProperties": false
-        }
-    })
+    property
 }
 
-fn get_acp_delegate_tool_responses() -> serde_json::Value {
-    let mut tool = get_acp_delegate_tool_chat();
-    if let Some(object) = tool.as_object_mut() {
-        object.insert(
-            "type".to_string(),
-            serde_json::Value::String("function".to_string()),
-        );
+#[cfg(feature = "acp")]
+async fn get_acp_delegate_tools_chat() -> Vec<serde_json::Value> {
+    let agents = get_acp_manager().list_agents().await;
+    if agents.is_empty() {
+        return vec![];
     }
-    tool
+
+    let agent_property = acp_agent_property(&agents);
+    vec![
+        serde_json::json!({
+            "name": "delegate_task",
+            "description": "Delegate one task to a configured ACP child agent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent": agent_property.clone(),
+                    "task": {
+                        "type": "string",
+                        "description": "The complete task to send to the ACP agent."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Optional working directory for the delegated ACP session."
+                    }
+                },
+                "required": ["agent", "task"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "delegate_tasks",
+            "description": "Spawn multiple configured ACP child agents concurrently for separate tasks.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "agent": agent_property,
+                                "task": {
+                                    "type": "string",
+                                    "description": "The complete task to send to the ACP agent."
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "Short human-readable label for this task."
+                                },
+                                "cwd": {
+                                    "type": "string",
+                                    "description": "Optional working directory for this delegated ACP session."
+                                }
+                            },
+                            "required": ["agent", "task"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["tasks"],
+                "additionalProperties": false
+            }
+        }),
+    ]
+}
+
+#[cfg(feature = "acp")]
+async fn get_acp_delegate_tools_responses() -> Vec<serde_json::Value> {
+    get_acp_delegate_tools_chat()
+        .await
+        .into_iter()
+        .map(|mut tool| {
+            if let Some(object) = tool.as_object_mut() {
+                object.insert(
+                    "type".to_string(),
+                    serde_json::Value::String("function".to_string()),
+                );
+            }
+            tool
+        })
+        .collect()
 }
 
 // --- Approvals & Execution ---
@@ -472,6 +538,9 @@ fn approve_sync(args: &serde_json::Value) -> bool {
     }
 
     if APPROVE_ALL.load(Ordering::SeqCst) {
+        return true;
+    }
+    if ACP_MODE.load(Ordering::SeqCst) {
         return true;
     }
 
@@ -578,26 +647,74 @@ async fn execute_shell_tool(args: &serde_json::Value) -> String {
     }
 }
 
-async fn handle_acp_tool(args: &serde_json::Value) -> String {
-    let agent = args.get("agent").and_then(|a| a.as_str()).unwrap_or("");
-    let task = args.get("task").and_then(|t| t.as_str()).unwrap_or("");
+#[cfg(feature = "acp")]
+fn acp_tool_task_from_value(index: usize, value: &serde_json::Value) -> Result<AgentTask, String> {
+    let task = value
+        .get("task")
+        .and_then(|task| task.as_str())
+        .ok_or_else(|| format!("tasks[{index}].task is required"))?;
 
-    if agent.trim().is_empty() || task.trim().is_empty() {
-        return "bad arguments: agent and task are required".to_string();
+    let mut agent_task = AgentTask::new(format!("task_{index}"), task.to_string());
+    if let Some(agent) = value.get("agent").and_then(|agent| agent.as_str()) {
+        agent_task = agent_task.with_agent(agent.to_string());
+    }
+    if let Some(description) = value
+        .get("description")
+        .and_then(|description| description.as_str())
+    {
+        agent_task.description = description.to_string();
+    }
+    if let Some(cwd) = value.get("cwd").and_then(|cwd| cwd.as_str()) {
+        agent_task = agent_task.with_working_directory(cwd.to_string());
     }
 
-    if !get_acp_client().has_agent(agent) {
-        let known = get_acp_client().list_agents().join(", ");
-        if known.is_empty() {
-            return "ACP delegation is not configured".to_string();
+    Ok(agent_task)
+}
+
+#[cfg(feature = "acp")]
+async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String> {
+    match name {
+        "delegate_task" => {
+            let task = match acp_tool_task_from_value(0, args) {
+                Ok(task) => task,
+                Err(error) => return Some(format!("bad arguments: {error}")),
+            };
+
+            Some(
+                get_acp_manager()
+                    .spawn_agent_for_task(task)
+                    .await
+                    .map(|result| result.output)
+                    .unwrap_or_else(|error| format!("ACP delegation failed: {error}")),
+            )
         }
-        return format!("Unknown ACP agent: {}. Known agents: {}", agent, known);
-    }
+        "delegate_tasks" => {
+            let values = match args.get("tasks").and_then(|tasks| tasks.as_array()) {
+                Some(values) if !values.is_empty() => values,
+                _ => return Some("bad arguments: tasks must be a non-empty array".to_string()),
+            };
 
-    get_acp_client()
-        .delegate_to(agent, task)
-        .await
-        .unwrap_or_else(|e| format!("ACP delegation failed: {}", e))
+            let mut tasks = Vec::new();
+            for (index, value) in values.iter().enumerate() {
+                match acp_tool_task_from_value(index, value) {
+                    Ok(task) => tasks.push(task),
+                    Err(error) => return Some(format!("bad arguments: {error}")),
+                }
+            }
+
+            let output = get_acp_manager()
+                .spawn_agents_for_tasks(tasks)
+                .await
+                .and_then(|results| {
+                    serde_json::to_string_pretty(&results)
+                        .map_err(|error| format!("failed to serialize ACP results: {error}"))
+                })
+                .unwrap_or_else(|error| format!("ACP delegation failed: {error}"));
+
+            Some(output)
+        }
+        _ => None,
+    }
 }
 
 async fn dispatch_tool_call(name: &str, args_str: &str) -> String {
@@ -606,9 +723,12 @@ async fn dispatch_tool_call(name: &str, args_str: &str) -> String {
         Err(e) => return e,
     };
 
-    if name == "delegate_task" {
-        handle_acp_tool(&args).await
-    } else if get_mcp_client().has_tool(name).await {
+    #[cfg(feature = "acp")]
+    if let Some(result) = handle_acp_tool(name, &args).await {
+        return result;
+    }
+
+    if get_mcp_client().has_tool(name).await {
         get_mcp_client()
             .call_tool(name, args)
             .await
@@ -675,9 +795,8 @@ async fn respond_responses(
     previous: Option<&str>,
 ) -> Result<serde_json::Value, reqwest::Error> {
     let mut tools: Vec<serde_json::Value> = vec![get_tool_responses().clone()];
-    if get_acp_client().has_agents() {
-        tools.push(get_acp_delegate_tool_responses());
-    }
+    #[cfg(feature = "acp")]
+    tools.extend(get_acp_delegate_tools_responses().await);
     tools.extend(get_mcp_client().get_tools_schema().await);
 
     let mut body = serde_json::json!({
@@ -792,11 +911,9 @@ async fn respond_chat(
     messages: &[serde_json::Value],
 ) -> Result<serde_json::Value, reqwest::Error> {
     let mut tools = vec![serde_json::json!({"type": "function", "function": get_tool_chat()})];
-    if get_acp_client().has_agents() {
-        tools.push(serde_json::json!({
-            "type": "function",
-            "function": get_acp_delegate_tool_chat()
-        }));
+    #[cfg(feature = "acp")]
+    for tool in get_acp_delegate_tools_chat().await {
+        tools.push(serde_json::json!({"type": "function", "function": tool}));
     }
     for tool in get_mcp_client().get_tools_schema().await {
         tools.push(serde_json::json!({"type": "function", "function": tool}));
@@ -936,6 +1053,7 @@ enum SessionState {
     Chat { messages: Vec<serde_json::Value> },
 }
 
+#[cfg(feature = "acp")]
 async fn run_single_turn(client: &Client, prompt: &str) -> String {
     let (_, format, _) = get_api_config();
     let (answer, _, _) = match format {
@@ -945,35 +1063,36 @@ async fn run_single_turn(client: &Client, prompt: &str) -> String {
     answer
 }
 
-fn start_acp_server(client: Client) {
-    let acp = get_config().acp.clone();
-    if !acp.enabled {
-        return;
-    }
+#[cfg(feature = "acp")]
+async fn run_acp_server() -> Result<(), String> {
+    ACP_MODE.store(true, Ordering::SeqCst);
+    check_api_key();
+    get_mcp_client().load_servers(get_config()).await;
 
-    let manifest = AgentManifest::nano(acp.agent_name.clone(), acp.description.clone());
-    let host = acp.host.clone();
-    let port = acp.port;
-    let api_key = acp.api_key.clone();
-
-    tokio::spawn(async move {
-        eprintln!("ACP server listening on http://{}:{}", host, port);
-        let server = AcpServer::new(host, port, manifest, api_key, move |task| {
+    let client = Client::new();
+    let server = AcpServer::new(
+        "nano",
+        "Nano local shell agent",
+        move |acp_prompt: AcpPrompt| {
             let client = client.clone();
             async move {
-                let answer = run_single_turn(&client, &task).await;
+                let prompt = format!(
+                    "ACP session: {}\ncwd: {}\n\n{}",
+                    acp_prompt.session_id,
+                    acp_prompt.cwd.display(),
+                    acp_prompt.prompt
+                );
+                let answer = run_single_turn(&client, &prompt).await;
                 if answer.starts_with("API Error:") {
                     Err(answer)
                 } else {
                     Ok(answer)
                 }
             }
-        });
+        },
+    );
 
-        if let Err(e) = server.start().await {
-            eprintln!("ACP server error: {}", e);
-        }
-    });
+    server.serve_stdio().await
 }
 
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
@@ -1047,13 +1166,30 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
 // --- Main ---
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    if args.iter().any(|arg| arg == "--acp") {
+        #[cfg(feature = "acp")]
+        {
+            if let Err(e) = run_acp_server().await {
+                eprintln!("ACP error: {}", e);
+                std::process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "acp"))]
+        {
+            eprintln!("ACP feature not enabled - rebuild with --features acp");
+            std::process::exit(1);
+        }
+    }
+
     check_api_key();
 
     // Load MCP servers
     get_mcp_client().load_servers(get_config()).await;
 
     let client = Client::new();
-    start_acp_server(client.clone());
     let mut args: Vec<String> = env::args().skip(1).collect();
 
     let mut flag = None;

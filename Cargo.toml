@@ -3,18 +3,17 @@ name = "nano-agent"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+acp = ["dep:agent-client-protocol"]
+
 [dependencies]
-bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-futures-util = "0.3"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+agent-client-protocol = { version = "0.12.1", optional = true }
+chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 walkdir = "2"
 dirs = "5"
 compact_str = "0.8"

@@ -1,0 +1,84 @@
+{
+  "model": "gpt-5.5",
+  "provider": "openai-compatible",
+  "max_tokens": 4096,
+  "temperature": 0.2,
+  "custom_providers": {
+    "openai-compatible": {
+      "provider_type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-..."
+    },
+    "local": {
+      "provider_type": "openai",
+      "base_url": "http://localhost:11434/v1",
+      "api_key": ""
+    }
+  },
+  "mcp_servers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "."
+      ],
+      "env": {},
+      "url": null,
+      "headers": {},
+      "show_logs": false
+    },
+    "docs": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "mcp-server-fetch",
+        "mcp-server-fetch"
+      ],
+      "env": {
+        "RUST_LOG": "info"
+      },
+      "url": null,
+      "headers": {},
+      "show_logs": true
+    },
+    "context7": {
+      "command": null,
+      "args": [],
+      "env": {},
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "ctx7sk-..."
+      },
+      "show_logs": false
+    }
+  },
+  "acp_agents": {
+    "coder": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "--features",
+        "acp",
+        "--",
+        "--acp"
+      ],
+      "env": {
+        "OPENAI_API_KEY": "sk-..."
+      },
+      "working_directory": "/path/to/project",
+      "timeout_secs": 600
+    },
+    "reviewer": {
+      "command": "nano-agent",
+      "args": [
+        "--acp"
+      ],
+      "env": {
+        "OPENAI_MODEL": "gpt-5.5"
+      },
+      "working_directory": null,
+      "timeout_secs": 300
+    }
+  }
+}
