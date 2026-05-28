@@ -9,7 +9,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -24,6 +24,8 @@ const SKIP_DIRS: &[&str] = &[
     "venv",
     "target",
 ];
+const NANO_ACP_ALLOWED_ROOT_ENV: &str = "NANO_ACP_ALLOWED_ROOT";
+const NANO_ACP_TOOLS_ENV: &str = "NANO_ACP_TOOLS";
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
 static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
@@ -36,6 +38,10 @@ static SYSTEM: OnceLock<String> = OnceLock::new();
 static MCP_CLIENT: OnceLock<McpClient> = OnceLock::new();
 #[cfg(feature = "acp")]
 static ACP_MANAGER: OnceLock<AcpAgentManager> = OnceLock::new();
+
+tokio::task_local! {
+    static ACP_SESSION_CWD: PathBuf;
+}
 
 fn get_config() -> &'static Config {
     CONFIG.get_or_init(Config::load)
@@ -294,11 +300,168 @@ fn find_files(roots: Vec<String>, names: Vec<&str>, limit: usize) -> String {
     }
 }
 
+fn env_flag_is_false(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+fn acp_spawn_policy_active() -> bool {
+    ACP_MODE.load(Ordering::SeqCst)
+        && (env::var_os(NANO_ACP_TOOLS_ENV).is_some()
+            || env::var_os(NANO_ACP_ALLOWED_ROOT_ENV).is_some())
+}
+
+fn acp_tools_enabled() -> bool {
+    if !ACP_MODE.load(Ordering::SeqCst) {
+        return true;
+    }
+
+    env::var(NANO_ACP_TOOLS_ENV)
+        .map(|value| !env_flag_is_false(&value))
+        .unwrap_or(true)
+}
+
+fn expose_execute_shell_tools() -> bool {
+    acp_tools_enabled()
+}
+
+#[cfg(feature = "acp")]
+fn expose_acp_delegate_tools() -> bool {
+    acp_tools_enabled()
+}
+
+fn expose_mcp_tools() -> bool {
+    !acp_spawn_policy_active()
+}
+
+fn context_cwd() -> PathBuf {
+    if ACP_MODE.load(Ordering::SeqCst)
+        && let Ok(cwd) = ACP_SESSION_CWD.try_with(Clone::clone)
+    {
+        return cwd;
+    }
+
+    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn configured_acp_root() -> Result<Option<PathBuf>, String> {
+    if !ACP_MODE.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+
+    let Some(root) = env::var_os(NANO_ACP_ALLOWED_ROOT_ENV) else {
+        return Ok(None);
+    };
+    let root = root.to_string_lossy();
+    let root = root.trim();
+    if root.is_empty() {
+        return Err(format!("{NANO_ACP_ALLOWED_ROOT_ENV} is empty"));
+    }
+
+    let root = PathBuf::from(root);
+    let root = if root.is_absolute() {
+        root
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("failed to resolve ACP working directory: {error}"))?
+            .join(root)
+    };
+    let root =
+        std::fs::canonicalize(&root).map_err(|error| format!("'{}': {error}", root.display()))?;
+    if !root.is_dir() {
+        return Err(format!("'{}' is not a directory", root.display()));
+    }
+    Ok(Some(root))
+}
+
+fn acp_allowed_root() -> Option<PathBuf> {
+    configured_acp_root().ok().flatten()
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+fn path_is_inside(root: &Path, path: &Path) -> bool {
+    let root = normalize_path(root);
+    let path = normalize_path(path);
+    path == root || path.starts_with(root)
+}
+
+fn shell_cwd_from_args(args: &serde_json::Value) -> Result<PathBuf, String> {
+    let cwd = args.get("cwd").and_then(|c| c.as_str()).unwrap_or(".");
+    let base = context_cwd();
+    let cwd = if cwd == "." || cwd.is_empty() {
+        base
+    } else {
+        let cwd = PathBuf::from(cwd);
+        if cwd.is_absolute() {
+            cwd
+        } else {
+            base.join(cwd)
+        }
+    };
+
+    let cwd =
+        std::fs::canonicalize(&cwd).map_err(|error| format!("cwd '{}': {error}", cwd.display()))?;
+    if !cwd.is_dir() {
+        return Err(format!("cwd '{}' is not a directory", cwd.display()));
+    }
+    Ok(cwd)
+}
+
+fn validate_acp_shell_access(run_cwd: &Path) -> Result<Option<PathBuf>, String> {
+    if !ACP_MODE.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    if !acp_tools_enabled() {
+        return Err(
+            "ACP tools are disabled because acp_agents.working_directory is not configured"
+                .to_string(),
+        );
+    }
+
+    let Some(root) = configured_acp_root()? else {
+        return Ok(None);
+    };
+    if path_is_inside(&root, run_cwd) {
+        Ok(Some(root))
+    } else {
+        Err(format!(
+            "cwd '{}' is outside ACP working_directory '{}'",
+            run_cwd.display(),
+            root.display()
+        ))
+    }
+}
+
+fn prepare_shell_execution(args: &serde_json::Value) -> Result<(PathBuf, PathBuf, bool), String> {
+    let run_cwd = shell_cwd_from_args(args).map_err(|error| format!("bad arguments: {error}"))?;
+    let restricted_root =
+        validate_acp_shell_access(&run_cwd).map_err(|error| format!("denied: {error}"))?;
+    let force_sandbox = restricted_root.is_some();
+    let writable_root = restricted_root.unwrap_or_else(|| run_cwd.clone());
+    Ok((run_cwd, writable_root, force_sandbox))
+}
+
 // --- System & Tool Setup ---
 fn get_system() -> &'static str {
     SYSTEM.get_or_init(|| {
-        let cwd = env::current_dir()
-            .unwrap_or_default()
+        let cwd = context_cwd()
             .to_str()
             .unwrap_or(".")
             .to_string();
@@ -328,6 +491,29 @@ fn get_system() -> &'static str {
         };
         #[cfg(not(feature = "acp"))]
         let delegation = "";
+        let tool_guidance = if expose_execute_shell_tools() {
+            "You are Nano, a general-purpose shell agent with a primary tool: execute_shell.\n\
+             When user asks for shell commands, ALWAYS make a tool_call to execute_shell\n\
+             Use it to inspect, edit, install, test, search, automate, and answer."
+                .to_string()
+        } else {
+            "You are Nano, a general-purpose shell agent. Local shell and MCP tools are disabled in this restricted ACP session.\n\
+             Answer from the prompt and provided context only."
+                .to_string()
+        };
+        let acp_restriction = acp_allowed_root()
+            .map(|root| {
+                format!(
+                    " Local shell commands must stay under {}.",
+                    root.display()
+                )
+            })
+            .unwrap_or_default();
+        let persistence = if expose_execute_shell_tools() {
+            "Keep taking shell steps until done or blocked."
+        } else {
+            "Complete the task without tool calls."
+        };
 
         // "You are Nano, a shell agent. Use the execute_shell tool for ALL shell commands.\n\
         //  When user asks for shell commands, ALWAYS make a tool_call to execute_shell - never describe the command in text.\n\
@@ -335,11 +521,9 @@ fn get_system() -> &'static str {
         //  Be concise. No markdown. cwd: {}\n\
 
         format!(
-            "You are Nano, a general-purpose shell agent with a primary tool: execute_shell.\n\
-             When user asks for shell commands, ALWAYS make a tool_call to execute_shell\n\
-             Use it to inspect, edit, install, test, search, automate, and answer.\n\
-             {}\n\
-             Be concise, tenacious, and relentlessly useful. Keep taking shell steps until done or blocked.\n\
+            "{}\n\
+             {}{}\n\
+             Be concise, tenacious, and relentlessly useful. {}\n\
              Output short plain-text snippets optimized for terminal reading; no markdown rendering or syntax highlighting.\n\
              Never run destructive commands unless explicitly requested.\n\
              cwd: {}\n\
@@ -347,7 +531,10 @@ fn get_system() -> &'static str {
              shell: {}\n\
              Important docs (read as needed): {}\n\
              Important skill files (read as needed): {}",
+            tool_guidance,
             delegation,
+            acp_restriction,
+            persistence,
             cwd,
             env::consts::OS,
             env::var("SHELL").unwrap_or_default(),
@@ -567,24 +754,24 @@ fn approve_sync(args: &serde_json::Value) -> bool {
 
 async fn execute_shell(args: &serde_json::Value) -> String {
     let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
-    let cwd = args.get("cwd").and_then(|c| c.as_str()).unwrap_or(".");
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
     let env_vars = args.get("env").and_then(|e| e.as_object());
 
-    let run_cwd = if cwd == "." || cwd.is_empty() {
-        env::current_dir().unwrap_or_default()
-    } else {
-        PathBuf::from(cwd)
+    let (run_cwd, writable_root, force_sandbox) = match prepare_shell_execution(args) {
+        Ok(prepared) => prepared,
+        Err(error) => return error,
     };
 
     let merged_command = format!("{} 2>&1", command);
 
-    let sandbox_enabled = env::var("NANO_SANDBOX")
-        .map(|v| v == "0" || v.to_lowercase() == "false")
-        .unwrap_or(true);
+    let sandbox_enabled = force_sandbox
+        || env::var("NANO_SANDBOX")
+            .map(|v| !env_flag_is_false(&v))
+            .unwrap_or(true);
     let sandbox = Sandbox::new(sandbox_enabled)
         .with_shell("sh")
-        .with_cwd(run_cwd.clone());
+        .with_cwd(writable_root)
+        .restrict_to_cwd(force_sandbox);
 
     let mut cmd = sandbox.wrap_command(&merged_command);
     cmd.current_dir(&run_cwd);
@@ -635,6 +822,9 @@ async fn execute_shell_tool(args: &serde_json::Value) -> String {
     if !(5..=10).contains(&words) {
         return "bad arguments: description must be 5-10 words".to_string();
     }
+    if let Err(error) = prepare_shell_execution(args) {
+        return error;
+    }
 
     let args_clone = args.clone();
     let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
@@ -675,6 +865,9 @@ fn acp_tool_task_from_value(index: usize, value: &serde_json::Value) -> Result<A
 async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String> {
     match name {
         "delegate_task" => {
+            if !expose_acp_delegate_tools() {
+                return Some("denied: ACP delegation tools are disabled".to_string());
+            }
             let task = match acp_tool_task_from_value(0, args) {
                 Ok(task) => task,
                 Err(error) => return Some(format!("bad arguments: {error}")),
@@ -689,6 +882,9 @@ async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String>
             )
         }
         "delegate_tasks" => {
+            if !expose_acp_delegate_tools() {
+                return Some("denied: ACP delegation tools are disabled".to_string());
+            }
             let values = match args.get("tasks").and_then(|tasks| tasks.as_array()) {
                 Some(values) if !values.is_empty() => values,
                 _ => return Some("bad arguments: tasks must be a non-empty array".to_string()),
@@ -729,6 +925,9 @@ async fn dispatch_tool_call(name: &str, args_str: &str) -> String {
     }
 
     if get_mcp_client().has_tool(name).await {
+        if !expose_mcp_tools() {
+            return "denied: MCP tools are disabled in this restricted ACP child".to_string();
+        }
         get_mcp_client()
             .call_tool(name, args)
             .await
@@ -794,10 +993,17 @@ async fn respond_responses(
     payload: serde_json::Value,
     previous: Option<&str>,
 ) -> Result<serde_json::Value, reqwest::Error> {
-    let mut tools: Vec<serde_json::Value> = vec![get_tool_responses().clone()];
+    let mut tools: Vec<serde_json::Value> = Vec::new();
+    if expose_execute_shell_tools() {
+        tools.push(get_tool_responses().clone());
+    }
     #[cfg(feature = "acp")]
-    tools.extend(get_acp_delegate_tools_responses().await);
-    tools.extend(get_mcp_client().get_tools_schema().await);
+    if expose_acp_delegate_tools() {
+        tools.extend(get_acp_delegate_tools_responses().await);
+    }
+    if expose_mcp_tools() {
+        tools.extend(get_mcp_client().get_tools_schema().await);
+    }
 
     let mut body = serde_json::json!({
         "model": get_model(),
@@ -910,13 +1116,20 @@ async fn respond_chat(
     client: &Client,
     messages: &[serde_json::Value],
 ) -> Result<serde_json::Value, reqwest::Error> {
-    let mut tools = vec![serde_json::json!({"type": "function", "function": get_tool_chat()})];
-    #[cfg(feature = "acp")]
-    for tool in get_acp_delegate_tools_chat().await {
-        tools.push(serde_json::json!({"type": "function", "function": tool}));
+    let mut tools = Vec::new();
+    if expose_execute_shell_tools() {
+        tools.push(serde_json::json!({"type": "function", "function": get_tool_chat()}));
     }
-    for tool in get_mcp_client().get_tools_schema().await {
-        tools.push(serde_json::json!({"type": "function", "function": tool}));
+    #[cfg(feature = "acp")]
+    if expose_acp_delegate_tools() {
+        for tool in get_acp_delegate_tools_chat().await {
+            tools.push(serde_json::json!({"type": "function", "function": tool}));
+        }
+    }
+    if expose_mcp_tools() {
+        for tool in get_mcp_client().get_tools_schema().await {
+            tools.push(serde_json::json!({"type": "function", "function": tool}));
+        }
     }
     let body = serde_json::json!({
         "model": get_model(),
@@ -1067,7 +1280,9 @@ async fn run_single_turn(client: &Client, prompt: &str) -> String {
 async fn run_acp_server() -> Result<(), String> {
     ACP_MODE.store(true, Ordering::SeqCst);
     check_api_key();
-    get_mcp_client().load_servers(get_config()).await;
+    if expose_mcp_tools() {
+        get_mcp_client().load_servers(get_config()).await;
+    }
 
     let client = Client::new();
     let server = AcpServer::new(
@@ -1082,7 +1297,9 @@ async fn run_acp_server() -> Result<(), String> {
                     acp_prompt.cwd.display(),
                     acp_prompt.prompt
                 );
-                let answer = run_single_turn(&client, &prompt).await;
+                let answer = ACP_SESSION_CWD
+                    .scope(acp_prompt.cwd.clone(), run_single_turn(&client, &prompt))
+                    .await;
                 if answer.starts_with("API Error:") {
                     Err(answer)
                 } else {

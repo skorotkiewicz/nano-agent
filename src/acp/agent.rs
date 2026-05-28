@@ -2,6 +2,8 @@ use crate::config::{AcpAgentConfig, Config};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(feature = "acp")]
+use std::path::{Component, Path};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
@@ -9,11 +11,17 @@ use tokio::time::{Duration, timeout};
 
 #[cfg(feature = "acp")]
 use agent_client_protocol::schema::{
-    InitializeRequest, PermissionOptionKind, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    InitializeRequest, PermissionOption, PermissionOptionKind, ProtocolVersion,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome,
 };
 #[cfg(feature = "acp")]
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo};
+
+#[cfg(feature = "acp")]
+const NANO_ACP_ALLOWED_ROOT_ENV: &str = "NANO_ACP_ALLOWED_ROOT";
+#[cfg(feature = "acp")]
+const NANO_ACP_TOOLS_ENV: &str = "NANO_ACP_TOOLS";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentTask {
@@ -173,8 +181,9 @@ async fn run_agent_task(
         return Err(format!("ACP agent '{agent_name}' has no command"));
     }
 
-    let agent = build_acp_agent(&agent_name, &agent_config)?;
-    let cwd = task_cwd(&agent_config, &task)?;
+    let tool_policy = AcpToolPolicy::from_config(&agent_name, &agent_config)?;
+    let agent = build_acp_agent(&agent_name, &agent_config, &tool_policy)?;
+    let cwd = task_cwd(&agent_config, &task, &tool_policy)?;
     let prompt = if task.description.trim().is_empty() {
         task.prompt.clone()
     } else {
@@ -182,34 +191,19 @@ async fn run_agent_task(
     };
     let task_id = task.task_id.clone();
     let timeout_secs = agent_config.timeout_secs.max(1);
+    let permission_policy = tool_policy.clone();
+    let permission_cwd = cwd.clone();
 
     let run = Client
         .builder()
         .name(format!("nano-child-{agent_name}"))
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _connection| {
-                let allow = request
-                    .options
-                    .iter()
-                    .find(|option| matches!(option.kind, PermissionOptionKind::AllowOnce))
-                    .or_else(|| {
-                        request
-                            .options
-                            .iter()
-                            .find(|option| matches!(option.kind, PermissionOptionKind::AllowAlways))
-                    })
-                    .or_else(|| request.options.first());
-
-                match allow {
-                    Some(option) => responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
-                            option.option_id.clone(),
-                        )),
-                    )),
-                    None => responder.respond(RequestPermissionResponse::new(
-                        RequestPermissionOutcome::Cancelled,
-                    )),
-                }
+                responder.respond(permission_response(
+                    &permission_policy,
+                    &permission_cwd,
+                    &request,
+                ))
             },
             agent_client_protocol::on_receive_request!(),
         )
@@ -254,9 +248,27 @@ async fn run_agent_task(
 }
 
 #[cfg(feature = "acp")]
-fn build_acp_agent(agent_name: &str, agent_config: &AcpAgentConfig) -> Result<AcpAgent, String> {
-    let mut args = agent_config
-        .env
+fn build_acp_agent(
+    agent_name: &str,
+    agent_config: &AcpAgentConfig,
+    tool_policy: &AcpToolPolicy,
+) -> Result<AcpAgent, String> {
+    let mut env = agent_config.env.clone();
+    match &tool_policy.allowed_root {
+        Some(root) => {
+            env.insert(NANO_ACP_TOOLS_ENV.to_string(), "1".to_string());
+            env.insert(
+                NANO_ACP_ALLOWED_ROOT_ENV.to_string(),
+                root.display().to_string(),
+            );
+        }
+        None => {
+            env.insert(NANO_ACP_TOOLS_ENV.to_string(), "0".to_string());
+            env.remove(NANO_ACP_ALLOWED_ROOT_ENV);
+        }
+    }
+
+    let mut args = env
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>();
@@ -268,19 +280,241 @@ fn build_acp_agent(agent_name: &str, agent_config: &AcpAgentConfig) -> Result<Ac
         .map_err(|error| format!("invalid ACP agent command for '{agent_name}': {error}"))
 }
 
-fn task_cwd(agent_config: &AcpAgentConfig, task: &AgentTask) -> Result<PathBuf, String> {
+#[cfg(feature = "acp")]
+#[derive(Clone, Debug)]
+struct AcpToolPolicy {
+    allowed_root: Option<PathBuf>,
+}
+
+#[cfg(feature = "acp")]
+impl AcpToolPolicy {
+    fn from_config(agent_name: &str, agent_config: &AcpAgentConfig) -> Result<Self, String> {
+        let Some(root) = agent_config
+            .working_directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|root| !root.is_empty())
+        else {
+            return Ok(Self { allowed_root: None });
+        };
+
+        let allowed_root = resolve_existing_dir(root, None).map_err(|error| {
+            format!("invalid working_directory for ACP agent '{agent_name}': {error}")
+        })?;
+        Ok(Self {
+            allowed_root: Some(allowed_root),
+        })
+    }
+
+    fn tools_allowed(&self) -> bool {
+        self.allowed_root.is_some()
+    }
+}
+
+#[cfg(feature = "acp")]
+fn task_cwd(
+    _agent_config: &AcpAgentConfig,
+    task: &AgentTask,
+    tool_policy: &AcpToolPolicy,
+) -> Result<PathBuf, String> {
+    let Some(root) = &tool_policy.allowed_root else {
+        return task
+            .working_directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .map(|cwd| resolve_existing_dir(cwd, None))
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map_err(|error| format!("failed to resolve ACP task cwd: {error}"))
+            });
+    };
+
     let cwd = task
         .working_directory
         .as_deref()
-        .or(agent_config.working_directory.as_deref())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty())
+        .map(|cwd| resolve_existing_dir(cwd, Some(root)))
+        .unwrap_or_else(|| Ok(root.clone()))?;
 
-    if cwd.is_absolute() {
+    if path_is_inside(root, &cwd) {
         Ok(cwd)
     } else {
+        Err(format!(
+            "ACP task cwd '{}' is outside configured working_directory '{}'",
+            cwd.display(),
+            root.display()
+        ))
+    }
+}
+
+#[cfg(feature = "acp")]
+fn permission_response(
+    tool_policy: &AcpToolPolicy,
+    session_cwd: &Path,
+    request: &RequestPermissionRequest,
+) -> RequestPermissionResponse {
+    let allowed = tool_policy
+        .allowed_root
+        .as_deref()
+        .is_some_and(|root| permission_request_inside_root(root, session_cwd, request));
+
+    let allow = allowed
+        .then(|| allow_option(&request.options))
+        .flatten()
+        .filter(|_| tool_policy.tools_allowed());
+
+    match allow {
+        Some(option) => RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+            SelectedPermissionOutcome::new(option.option_id.clone()),
+        )),
+        None => RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled),
+    }
+}
+
+#[cfg(feature = "acp")]
+fn allow_option(options: &[PermissionOption]) -> Option<&PermissionOption> {
+    options
+        .iter()
+        .find(|option| matches!(option.kind, PermissionOptionKind::AllowOnce))
+        .or_else(|| {
+            options
+                .iter()
+                .find(|option| matches!(option.kind, PermissionOptionKind::AllowAlways))
+        })
+}
+
+#[cfg(feature = "acp")]
+fn permission_request_inside_root(
+    root: &Path,
+    session_cwd: &Path,
+    request: &RequestPermissionRequest,
+) -> bool {
+    if !path_is_inside(root, session_cwd) {
+        return false;
+    }
+
+    request
+        .tool_call
+        .fields
+        .locations
+        .as_ref()
+        .map(|locations| {
+            locations.iter().all(|location| {
+                let path = absolutize_path(&location.path, session_cwd);
+                path_is_inside(root, &path)
+            })
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(feature = "acp")]
+fn resolve_existing_dir(path: &str, relative_base: Option<&Path>) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    let absolute = if path.is_absolute() {
+        path
+    } else if let Some(base) = relative_base {
+        base.join(path)
+    } else {
         std::env::current_dir()
-            .map(|base| base.join(cwd))
-            .map_err(|error| format!("failed to resolve ACP task cwd: {error}"))
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+
+    let canonical = std::fs::canonicalize(&absolute)
+        .map_err(|error| format!("'{}': {error}", absolute.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("'{}' is not a directory", canonical.display()));
+    }
+    Ok(canonical)
+}
+
+#[cfg(feature = "acp")]
+fn absolutize_path(path: &Path, base: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+
+    std::fs::canonicalize(&absolute).unwrap_or_else(|_| normalize_path(&absolute))
+}
+
+#[cfg(feature = "acp")]
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+#[cfg(feature = "acp")]
+fn path_is_inside(root: &Path, path: &Path) -> bool {
+    let root = normalize_path(root);
+    let path = normalize_path(path);
+    path == root || path.starts_with(root)
+}
+
+#[cfg(all(test, feature = "acp"))]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("nano-agent-acp-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    #[test]
+    fn configured_working_directory_sets_task_root() {
+        let root = temp_dir("task-root");
+        let config = AcpAgentConfig {
+            command: "nano-agent".to_string(),
+            working_directory: Some(root.display().to_string()),
+            ..Default::default()
+        };
+        let policy = AcpToolPolicy::from_config("coder", &config).unwrap();
+        let cwd = task_cwd(&config, &AgentTask::new("task", "prompt"), &policy).unwrap();
+
+        assert_eq!(cwd, root);
+    }
+
+    #[test]
+    fn task_working_directory_must_stay_inside_configured_root() {
+        let root = temp_dir("inside-root");
+        let outside = temp_dir("outside-root");
+        let config = AcpAgentConfig {
+            command: "nano-agent".to_string(),
+            working_directory: Some(root.display().to_string()),
+            ..Default::default()
+        };
+        let policy = AcpToolPolicy::from_config("coder", &config).unwrap();
+        let task =
+            AgentTask::new("task", "prompt").with_working_directory(outside.display().to_string());
+
+        let error = task_cwd(&config, &task, &policy).unwrap_err();
+        assert!(error.contains("outside configured working_directory"));
+    }
+
+    #[test]
+    fn missing_working_directory_disables_child_tool_approval() {
+        let config = AcpAgentConfig {
+            command: "nano-agent".to_string(),
+            ..Default::default()
+        };
+        let policy = AcpToolPolicy::from_config("coder", &config).unwrap();
+
+        assert!(!policy.tools_allowed());
     }
 }

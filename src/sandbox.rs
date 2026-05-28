@@ -7,6 +7,7 @@ pub struct Sandbox {
     enabled: bool,
     cwd: PathBuf,
     shell: String,
+    restrict_to_cwd: bool,
 }
 
 impl Sandbox {
@@ -16,6 +17,7 @@ impl Sandbox {
             enabled,
             cwd,
             shell: "bash".to_string(),
+            restrict_to_cwd: false,
         }
     }
 
@@ -31,6 +33,11 @@ impl Sandbox {
         self
     }
 
+    pub fn restrict_to_cwd(mut self, restrict: bool) -> Self {
+        self.restrict_to_cwd = restrict;
+        self
+    }
+
     pub fn wrap_command(&self, command: &str) -> Command {
         if !self.enabled {
             let mut cmd = Command::new(&self.shell);
@@ -39,16 +46,19 @@ impl Sandbox {
         }
 
         let mut cmd = Command::new("bwrap");
-        cmd.args(["--ro-bind", "/", "/", "--bind"]);
-        cmd.arg(self.cwd.as_os_str());
-        cmd.arg(self.cwd.as_os_str());
+        cmd.args(["--ro-bind", "/", "/"]);
+
+        let hidden_roots = hidden_roots(self.restrict_to_cwd);
+        for root in &hidden_roots {
+            cmd.arg("--tmpfs").arg(root.as_os_str());
+        }
+        bind_mountpoint_dirs(&mut cmd, &self.cwd, &hidden_roots);
+
+        cmd.arg("--bind")
+            .arg(self.cwd.as_os_str())
+            .arg(self.cwd.as_os_str());
+        cmd.args(["--proc", "/proc", "--dev", "/dev"]);
         cmd.args([
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
             "--unshare-all",
             "--die-with-parent",
             &self.shell,
@@ -56,6 +66,43 @@ impl Sandbox {
             command,
         ]);
         cmd
+    }
+}
+
+fn hidden_roots(restrict_to_cwd: bool) -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from("/tmp")];
+    if restrict_to_cwd {
+        roots.extend(
+            ["/home", "/root", "/mnt", "/media", "/run/user"]
+                .into_iter()
+                .map(PathBuf::from)
+                .filter(|path| path.exists()),
+        );
+    }
+    roots
+}
+
+fn bind_mountpoint_dirs(cmd: &mut Command, bind_path: &std::path::Path, hidden_roots: &[PathBuf]) {
+    let Some(parent) = bind_path.parent() else {
+        return;
+    };
+
+    for hidden_root in hidden_roots {
+        if !bind_path.starts_with(hidden_root) {
+            continue;
+        }
+
+        let Ok(relative) = parent.strip_prefix(hidden_root) else {
+            continue;
+        };
+        let mut current = hidden_root.clone();
+        for component in relative.components() {
+            current.push(component.as_os_str());
+            cmd.arg("--dir").arg(current.as_os_str());
+        }
+        if bind_path != hidden_root {
+            cmd.arg("--dir").arg(bind_path.as_os_str());
+        }
     }
 }
 
@@ -88,5 +135,11 @@ mod tests {
         let custom_cwd = PathBuf::from("/tmp");
         let sb = Sandbox::new(true).with_cwd(custom_cwd.clone());
         assert_eq!(sb.cwd, custom_cwd);
+    }
+
+    #[test]
+    fn test_sandbox_restrict_to_cwd() {
+        let sb = Sandbox::new(true).restrict_to_cwd(true);
+        assert!(sb.restrict_to_cwd);
     }
 }
