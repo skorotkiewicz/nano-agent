@@ -68,7 +68,6 @@ Useful fields:
 - `max_tokens` - response token limit
 - `temperature` - sampling temperature
 - `custom_providers` - OpenAI-compatible providers
-- `quick_models` - named model presets
 - `mcp_servers` - MCP servers exposed as tools
 - `acp` - ACP server and delegation settings
 

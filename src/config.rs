@@ -10,12 +10,6 @@ pub struct CustomProvider {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct QuickModel {
-    pub provider: String,
-    pub model: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpServerConfig {
     #[serde(default)]
     pub command: Option<String>,
@@ -117,8 +111,6 @@ pub struct Config {
     #[serde(default)]
     pub custom_providers: std::collections::HashMap<String, CustomProvider>,
     #[serde(default)]
-    pub quick_models: std::collections::HashMap<String, QuickModel>,
-    #[serde(default)]
     pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
     #[serde(default)]
     pub acp: AcpConfig,
@@ -161,10 +153,6 @@ impl Config {
 
     pub fn get_custom_provider(&self, name: &str) -> Option<&CustomProvider> {
         self.custom_providers.get(name)
-    }
-
-    pub fn get_quick_model(&self, name: &str) -> Option<&QuickModel> {
-        self.quick_models.get(name)
     }
 }
 
@@ -215,22 +203,6 @@ mod tests {
         }"#;
         let parsed: Config = serde_json::from_str(config).unwrap();
         assert!(parsed.get_custom_provider("test").is_some());
-    }
-
-    #[test]
-    fn test_load_config_with_quick_models() {
-        let config = r#"{
-            "quick_models": {
-                "fast": {
-                    "provider": "openrouter",
-                    "model": "google/gemini-flash"
-                }
-            }
-        }"#;
-        let parsed: Config = serde_json::from_str(config).unwrap();
-        let quick = parsed.get_quick_model("fast").unwrap();
-        assert_eq!(quick.provider, "openrouter");
-        assert_eq!(quick.model, "google/gemini-flash");
     }
 
     #[test]

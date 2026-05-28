@@ -15,12 +15,6 @@
       "api_key": "not-needed"
     }
   },
-  "quick_models": {
-    "fast": {
-      "provider": "openrouter",
-      "model": "google/gemini-flash-1.5"
-    }
-  },
   "mcp_servers": {
     "semble": {
       "command": "uvx",
