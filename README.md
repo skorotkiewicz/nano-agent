@@ -35,6 +35,7 @@ Configure child ACP agents in `nano_config.json` or `~/.config/nano/config.json`
     "worker": {
       "command": "cargo",
       "args": ["run", "--features", "acp", "--", "--acp"],
+      "working_directory": "/path/to/project",
       "timeout_secs": 600
     }
   }
@@ -42,6 +43,7 @@ Configure child ACP agents in `nano_config.json` or `~/.config/nano/config.json`
 ```
 
 When configured, nano exposes `delegate_task` and `delegate_tasks` to spawn child ACP agents.
+`working_directory` is the tool boundary for that child. If it is omitted or null, spawned tools are disabled.
 
 ## Test
 
