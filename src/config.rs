@@ -25,6 +25,16 @@ pub struct McpServerConfig {
     pub show_logs: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MitoModeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 fn default_acp_timeout_secs() -> u64 {
     600
 }
@@ -66,6 +76,8 @@ pub struct Config {
     pub mcp_servers: HashMap<String, McpServerConfig>,
     #[serde(default)]
     pub acp_agents: HashMap<String, AcpAgentConfig>,
+    #[serde(default, rename = "mito-mode", alias = "mito_mode")]
+    pub mito_mode: MitoModeConfig,
 }
 
 impl Config {
@@ -106,6 +118,10 @@ impl Config {
     pub fn get_custom_provider(&self, name: &str) -> Option<&CustomProvider> {
         self.custom_providers.get(name)
     }
+
+    pub fn get_mito_mode(&self) -> &MitoModeConfig {
+        &self.mito_mode
+    }
 }
 
 fn config_path_global() -> PathBuf {
@@ -132,6 +148,7 @@ mod tests {
         assert!(config.provider.is_none());
         assert!(config.max_tokens.is_none());
         assert!(config.temperature.is_none());
+        assert!(!config.mito_mode.enabled);
     }
 
     #[test]
@@ -261,5 +278,34 @@ mod tests {
         assert_eq!(agent.args, vec!["--acp"]);
         assert_eq!(agent.working_directory.as_deref(), Some("/tmp/project"));
         assert_eq!(agent.timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_load_config_with_mito_mode() {
+        let config = r#"{
+            "mito-mode": {
+                "enabled": true,
+                "provider": "local-gemma4",
+                "model": "gemma4"
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        let mito = parsed.get_mito_mode();
+        assert!(mito.enabled);
+        assert_eq!(mito.provider.as_deref(), Some("local-gemma4"));
+        assert_eq!(mito.model.as_deref(), Some("gemma4"));
+    }
+
+    #[test]
+    fn test_load_config_with_mito_mode_alias() {
+        let config = r#"{
+            "mito_mode": {
+                "enabled": true,
+                "provider": "local"
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+        assert!(parsed.mito_mode.enabled);
+        assert_eq!(parsed.mito_mode.provider.as_deref(), Some("local"));
     }
 }

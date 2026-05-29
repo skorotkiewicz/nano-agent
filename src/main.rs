@@ -62,6 +62,14 @@ enum ApiFormat {
     ChatCompletions,
 }
 
+#[derive(Clone, Debug)]
+struct ApiTarget {
+    url: String,
+    format: ApiFormat,
+    api_key: String,
+    model: String,
+}
+
 fn is_tty() -> bool {
     *IS_TTY.get_or_init(|| io::stderr().is_terminal())
 }
@@ -96,32 +104,59 @@ fn check_api_key() {
 }
 
 fn get_api_config() -> (String, ApiFormat, String) {
-    // Check custom providers first
+    let target = get_api_target();
+    (target.url, target.format, target.api_key)
+}
+
+fn custom_provider_target(provider_name: &str, model: String) -> Option<ApiTarget> {
+    let custom = get_config().get_custom_provider(provider_name)?;
+    let base = custom.base_url.trim_end_matches('/');
+    Some(ApiTarget {
+        url: format!("{}/chat/completions", base),
+        format: ApiFormat::ChatCompletions,
+        api_key: custom.api_key.clone().unwrap_or_default(),
+        model,
+    })
+}
+
+fn get_api_target() -> ApiTarget {
     if let Some(provider_name) = get_config().get_provider()
-        && let Some(custom) = get_config().get_custom_provider(provider_name)
+        && let Some(target) = custom_provider_target(provider_name, get_model().to_string())
     {
-        let base = custom.base_url.trim_end_matches('/');
-        return (
-            format!("{}/chat/completions", base),
-            ApiFormat::ChatCompletions,
-            custom.api_key.clone().unwrap_or_default(),
-        );
+        return target;
     }
 
     if let Ok(base) = env::var("OPENAI_BASE_URL") {
         let base = base.trim_end_matches('/');
-        (
-            format!("{}/chat/completions", base),
-            ApiFormat::ChatCompletions,
-            env::var("OPENAI_API_KEY").unwrap_or_default(),
-        )
+        ApiTarget {
+            url: format!("{}/chat/completions", base),
+            format: ApiFormat::ChatCompletions,
+            api_key: env::var("OPENAI_API_KEY").unwrap_or_default(),
+            model: get_model().to_string(),
+        }
     } else {
-        (
-            "https://api.openai.com/v1/responses".to_string(),
-            ApiFormat::Responses,
-            env::var("OPENAI_API_KEY").unwrap_or_default(),
-        )
+        ApiTarget {
+            url: "https://api.openai.com/v1/responses".to_string(),
+            format: ApiFormat::Responses,
+            api_key: env::var("OPENAI_API_KEY").unwrap_or_default(),
+            model: get_model().to_string(),
+        }
     }
+}
+
+fn get_mito_target() -> Result<ApiTarget, String> {
+    let mito = get_config().get_mito_mode();
+    if !mito.enabled {
+        return Err("mito mode is not enabled in config".to_string());
+    }
+
+    let provider = mito
+        .provider
+        .as_deref()
+        .ok_or_else(|| "mito-mode.provider is not configured".to_string())?;
+    let model = mito.model.as_deref().unwrap_or(provider).to_string();
+    custom_provider_target(provider, model)
+        .ok_or_else(|| format!("mito-mode.provider '{provider}' is not in custom_providers"))
 }
 
 fn color(code: &str, text: &str) -> String {
@@ -942,11 +977,9 @@ async fn dispatch_tool_call(name: &str, args_str: &str) -> String {
 // --- API Interaction ---
 async fn respond_api(
     client: &Client,
+    target: &ApiTarget,
     body: serde_json::Value,
-    api_key: &str,
 ) -> Result<serde_json::Value, reqwest::Error> {
-    let (url, _, _) = get_api_config();
-
     let (tx, mut rx) = tokio::sync::watch::channel(false);
     let spinner_handle = if is_tty() {
         Some(tokio::spawn(async move {
@@ -971,10 +1004,12 @@ async fn respond_api(
         None
     };
 
-    let mut req = client.post(&url).header("Content-Type", "application/json");
+    let mut req = client
+        .post(&target.url)
+        .header("Content-Type", "application/json");
 
-    if !api_key.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", api_key));
+    if !target.api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", target.api_key));
     }
 
     let res = req.json(&body).send().await?.json().await;
@@ -993,6 +1028,7 @@ async fn respond_responses(
     payload: serde_json::Value,
     previous: Option<&str>,
 ) -> Result<serde_json::Value, reqwest::Error> {
+    let target = get_api_target();
     let mut tools: Vec<serde_json::Value> = Vec::new();
     if expose_execute_shell_tools() {
         tools.push(get_tool_responses().clone());
@@ -1006,7 +1042,7 @@ async fn respond_responses(
     }
 
     let mut body = serde_json::json!({
-        "model": get_model(),
+        "model": target.model.as_str(),
         "instructions": get_system(),
         "tools": tools,
         "input": payload
@@ -1014,8 +1050,7 @@ async fn respond_responses(
     if let Some(prev) = previous {
         body["previous_response_id"] = serde_json::Value::String(prev.to_string());
     }
-    let (_, _, api_key) = get_api_config();
-    respond_api(client, body, &api_key).await
+    respond_api(client, &target, body).await
 }
 
 fn text(response: &serde_json::Value) -> String {
@@ -1112,9 +1147,10 @@ async fn run_responses(
 }
 
 // --- Chat Completions API Mode ---
-async fn respond_chat(
+async fn respond_chat_with_target(
     client: &Client,
     messages: &[serde_json::Value],
+    target: &ApiTarget,
 ) -> Result<serde_json::Value, reqwest::Error> {
     let mut tools = Vec::new();
     if expose_execute_shell_tools() {
@@ -1132,12 +1168,11 @@ async fn respond_chat(
         }
     }
     let body = serde_json::json!({
-        "model": get_model(),
+        "model": target.model.as_str(),
         "messages": messages,
         "tools": tools
     });
-    let (_, _, api_key) = get_api_config();
-    respond_api(client, body, &api_key).await
+    respond_api(client, target, body).await
 }
 
 async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_json::Value {
@@ -1153,14 +1188,25 @@ async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_js
 async fn run_chat(
     client: &Client,
     prompt: &str,
+    messages: Vec<serde_json::Value>,
+) -> (String, Option<String>, Option<Vec<serde_json::Value>>) {
+    let target = get_api_target();
+    run_chat_with_system(client, prompt, messages, get_system(), &target).await
+}
+
+async fn run_chat_with_system(
+    client: &Client,
+    prompt: &str,
     mut messages: Vec<serde_json::Value>,
+    system: &str,
+    target: &ApiTarget,
 ) -> (String, Option<String>, Option<Vec<serde_json::Value>>) {
     if messages.is_empty() {
-        messages.push(serde_json::json!({"role": "system", "content": get_system()}));
+        messages.push(serde_json::json!({"role": "system", "content": system}));
     }
     messages.push(serde_json::json!({"role": "user", "content": prompt}));
 
-    let mut response = match respond_chat(client, &messages).await {
+    let mut response = match respond_chat_with_target(client, &messages, target).await {
         Ok(r) => r,
         Err(e) => return (format!("API Error: {}", e), None, Some(messages)),
     };
@@ -1219,7 +1265,7 @@ async fn run_chat(
             messages.push(output);
         }
 
-        response = match respond_chat(client, &messages).await {
+        response = match respond_chat_with_target(client, &messages, target).await {
             Ok(r) => r,
             Err(e) => {
                 return (
@@ -1266,9 +1312,82 @@ enum SessionState {
     Chat { messages: Vec<serde_json::Value> },
 }
 
+fn strip_mito_prefix(prompt: &str) -> Option<&str> {
+    let trimmed = prompt.trim_start();
+    let rest = trimmed.strip_prefix("/mito")?;
+    if rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace) {
+        Some(rest.trim_start())
+    } else {
+        None
+    }
+}
+
+fn extract_mito_handoff(answer: &str) -> Option<String> {
+    const PREFIX: &str = "MITO_SEND:";
+    let index = answer.find(PREFIX)?;
+    let handoff = answer[index + PREFIX.len()..].trim();
+    if handoff.is_empty() {
+        None
+    } else {
+        Some(handoff.to_string())
+    }
+}
+
+fn get_mito_system() -> String {
+    let cwd = context_cwd().to_str().unwrap_or(".").to_string();
+    let docs = find_files(
+        vec![cwd.clone()],
+        vec![
+            "claude.md",
+            "agent.md",
+            "agents.md",
+            "AGENTS.md",
+            "readme.md",
+        ],
+        40,
+    );
+
+    format!(
+        "You are Mito, Nano's local planning agent.\n\
+         The user talks to you through /mito messages; the /mito prefix has already been removed.\n\
+         Keep a separate private context from the primary LLM.\n\
+         Your job is to discuss the request with the user, inspect the current directory when useful, and prepare a detailed handoff for the primary LLM.\n\
+         Ask concise clarifying questions when the task is underspecified.\n\
+         Use execute_shell and MCP tools only when they help you understand the repo or produce a better handoff. For execute_shell, description must be 5-10 words. Never run destructive commands unless explicitly requested.\n\
+         When you are ready for the primary LLM to do the work, output exactly one handoff and no other text, starting with MITO_SEND: followed by the complete prompt.\n\
+         The handoff prompt must include the objective, relevant context, constraints, expected files or deliverables, and any preferences learned from the user.\n\
+         cwd: {}\n\
+         Important docs (read as needed): {}",
+        cwd, docs
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_mito_handoff, strip_mito_prefix};
+
+    #[test]
+    fn strip_mito_prefix_accepts_command_boundary() {
+        assert_eq!(strip_mito_prefix("/mito build this"), Some("build this"));
+        assert_eq!(strip_mito_prefix("  /mito\nbuild this"), Some("build this"));
+        assert_eq!(strip_mito_prefix("/mito"), Some(""));
+        assert_eq!(strip_mito_prefix("/mitochondria"), None);
+    }
+
+    #[test]
+    fn extract_mito_handoff_reads_marker_body() {
+        assert_eq!(
+            extract_mito_handoff("MITO_SEND: implement the feature").as_deref(),
+            Some("implement the feature")
+        );
+        assert_eq!(extract_mito_handoff("MITO_SEND:   "), None);
+        assert_eq!(extract_mito_handoff("ask a question first"), None);
+    }
+}
+
 #[cfg(feature = "acp")]
 async fn run_single_turn(client: &Client, prompt: &str) -> String {
-    let (_, format, _) = get_api_config();
+    let format = get_api_target().format;
     let (answer, _, _) = match format {
         ApiFormat::Responses => run_responses(client, prompt, None).await,
         ApiFormat::ChatCompletions => run_chat(client, prompt, vec![]).await,
@@ -1312,15 +1431,89 @@ async fn run_acp_server() -> Result<(), String> {
     server.serve_stdio().await
 }
 
+async fn run_state_turn(
+    client: &Client,
+    prompt: &str,
+    state: &mut SessionState,
+    label: &mut Option<String>,
+    label_prompt: &str,
+) -> String {
+    let result = match state {
+        SessionState::Responses { previous } => {
+            run_responses(client, prompt, previous.as_deref()).await
+        }
+        SessionState::Chat { messages } => run_chat(client, prompt, messages.clone()).await,
+    };
+
+    let (answer, prev_id, new_messages) = result;
+    let session_label = label.as_deref().unwrap_or(label_prompt);
+
+    match state {
+        SessionState::Responses { previous } => {
+            if let Some(ref id) = prev_id {
+                save_session(id, session_label, None);
+            }
+            *previous = prev_id;
+        }
+        SessionState::Chat { messages } => {
+            if let Some(msgs) = new_messages {
+                save_session("chat-session", session_label, Some(msgs.clone()));
+                *messages = msgs;
+            }
+        }
+    }
+
+    if label.is_none() {
+        *label = Some(label_prompt.to_string());
+    }
+
+    answer
+}
+
+async fn run_mito_turn(
+    client: &Client,
+    prompt: &str,
+    mito_messages: &mut Vec<serde_json::Value>,
+    main_state: &mut SessionState,
+    main_label: &mut Option<String>,
+) -> String {
+    let target = match get_mito_target() {
+        Ok(target) => target,
+        Err(error) => return format!("mito error: {error}"),
+    };
+    let system = get_mito_system();
+    let (answer, _, new_messages) =
+        run_chat_with_system(client, prompt, mito_messages.clone(), &system, &target).await;
+
+    if let Some(messages) = new_messages {
+        *mito_messages = messages;
+    }
+
+    let Some(handoff) = extract_mito_handoff(&answer) else {
+        return format!("mito > {}", answer);
+    };
+
+    let main_answer = run_state_turn(client, &handoff, main_state, main_label, prompt).await;
+    if main_answer.is_empty() {
+        format!("mito > {}", handoff)
+    } else {
+        format!("mito > {}\n{}", handoff, main_answer)
+    }
+}
+
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
     eprintln!(
         "{} repl {} mcp: {}",
         color("1", "nano"),
-        color("90", "(:q quit, :reset reset, end with \\ for multiline)"),
+        color(
+            "90",
+            "(:q quit, :reset reset, /mito plan, end with \\ for multiline)"
+        ),
         color("90", &get_mcp_client().status())
     );
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
+    let mut mito_messages = Vec::new();
 
     loop {
         let prompt = match read_repl_input(&mut lines).await {
@@ -1336,46 +1529,28 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
             return;
         }
         if lower == ":reset" || lower == "reset" {
-            state = match get_api_config().1 {
+            state = match get_api_target().format {
                 ApiFormat::Responses => SessionState::Responses { previous: None },
                 ApiFormat::ChatCompletions => SessionState::Chat { messages: vec![] },
             };
             label = None;
+            mito_messages.clear();
             eprintln!("{}", color("90", "reset"));
             continue;
         }
 
-        let result = match &state {
-            SessionState::Responses { previous } => {
-                run_responses(client, &prompt, previous.as_deref()).await
-            }
-            SessionState::Chat { messages } => run_chat(client, &prompt, messages.clone()).await,
+        let answer = if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
+            run_mito_turn(
+                client,
+                mito_prompt,
+                &mut mito_messages,
+                &mut state,
+                &mut label,
+            )
+            .await
+        } else {
+            run_state_turn(client, &prompt, &mut state, &mut label, &prompt).await
         };
-
-        let (answer, prev_id, new_messages) = result;
-
-        match &mut state {
-            SessionState::Responses { previous } => {
-                if let Some(ref id) = prev_id {
-                    save_session(id, label.as_deref().unwrap_or(""), None);
-                }
-                *previous = prev_id;
-            }
-            SessionState::Chat { messages } => {
-                if let Some(msgs) = new_messages {
-                    save_session(
-                        "chat-session",
-                        label.as_deref().unwrap_or(""),
-                        Some(msgs.clone()),
-                    );
-                    *messages = msgs;
-                }
-            }
-        }
-
-        if label.is_none() {
-            label = Some(prompt.clone());
-        }
         println!("{}", answer);
     }
 }
@@ -1415,7 +1590,7 @@ async fn main() {
     }
     let prompt = args.join(" ");
 
-    let (_, format, _) = get_api_config();
+    let format = get_api_target().format;
 
     let mut state = match format {
         ApiFormat::Responses => SessionState::Responses { previous: None },
@@ -1468,17 +1643,19 @@ async fn main() {
     }
 
     if !prompt.is_empty() {
-        let result = match &state {
-            SessionState::Responses { previous } => {
-                run_responses(&client, &prompt, previous.as_deref()).await
-            }
-            SessionState::Chat { messages } => run_chat(&client, &prompt, messages.clone()).await,
+        let mut mito_messages = Vec::new();
+        let answer = if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
+            run_mito_turn(
+                &client,
+                mito_prompt,
+                &mut mito_messages,
+                &mut state,
+                &mut label,
+            )
+            .await
+        } else {
+            run_state_turn(&client, &prompt, &mut state, &mut label, &prompt).await
         };
-
-        let (answer, prev_id, new_messages) = result;
-        if let Some(ref id) = prev_id {
-            save_session(id, label.as_deref().unwrap_or(&prompt), new_messages);
-        }
         println!("{}", answer);
     } else {
         repl(&client, state, label).await;

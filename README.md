@@ -1,6 +1,36 @@
-# nano-agent
+# Nano Agent
 
-Small Rust shell agent with OpenAI-compatible model calls, MCP tools, and optional ACP support.
+A minimal Rust shell agent with OpenAI-compatible model calls, approval-gated command execution, MCP tools, and optional ACP support.
+
+## Install
+
+```sh
+cargo install --path .
+```
+
+## Setup
+
+Set an API key:
+
+```sh
+export OPENAI_API_KEY=sk-...
+```
+
+Or create `~/.config/nano/config.json` or `./nano_config.json`:
+
+```json
+{
+  "model": "gpt-4-turbo",
+  "provider": "openrouter",
+  "custom_providers": {
+    "openrouter": {
+      "provider_type": "openai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "sk-or-..."
+    }
+  }
+}
+```
 
 ## Build
 
@@ -13,11 +43,33 @@ cargo build --features acp
 
 ```sh
 OPENAI_API_KEY=... cargo run -- "inspect this repo"
+cargo run
 cargo run -- -c
 cargo run -- -s
 ```
 
-`-c` continues the last session in the current directory. `-s` lets you pick a recent session.
+`-c` continues the last session in the current directory. `-s` lets you pick a recent session. In the REPL, `:q` quits and `:reset` clears the session.
+
+## Configuration
+
+Config file priority is `~/.config/nano/config.json`, then `./nano_config.json`.
+
+Supported fields:
+
+- `model`
+- `provider`
+- `max_tokens`
+- `temperature`
+- `custom_providers`
+- `mcp_servers`
+- `acp_agents`
+
+Environment:
+
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `OPENAI_MODEL`
+- `NANO_MAX_STEPS`
 
 ## ACP
 

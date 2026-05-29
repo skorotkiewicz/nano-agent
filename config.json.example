@@ -15,6 +15,11 @@
       "api_key": ""
     }
   },
+  "mito-mode": {
+    "enabled": true,
+    "provider": "local",
+    "model": "gemma4"
+  },
   "mcp_servers": {
     "filesystem": {
       "command": "npx",
