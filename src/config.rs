@@ -7,6 +7,8 @@ pub struct CustomProvider {
     pub provider_type: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

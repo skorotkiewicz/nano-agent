@@ -75,9 +75,9 @@ fn is_tty() -> bool {
 }
 
 fn get_model() -> &'static str {
-    if let Some(model) = get_config().get_model() {
-        return model;
-    }
+    // if let Some(model) = get_config().get_model() {
+    //     return model;
+    // }
     MODEL.get_or_init(|| env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string()))
 }
 
@@ -108,20 +108,25 @@ fn get_api_config() -> (String, ApiFormat, String) {
     (target.url, target.format, target.api_key)
 }
 
-fn custom_provider_target(provider_name: &str, model: String) -> Option<ApiTarget> {
+fn custom_provider_target(provider_name: &str, model: Option<String>) -> Option<ApiTarget> {
     let custom = get_config().get_custom_provider(provider_name)?;
     let base = custom.base_url.trim_end_matches('/');
     Some(ApiTarget {
         url: format!("{}/chat/completions", base),
         format: ApiFormat::ChatCompletions,
         api_key: custom.api_key.clone().unwrap_or_default(),
-        model,
+        model: model.unwrap_or_else(|| {
+            custom
+                .model
+                .clone()
+                .unwrap_or_else(|| get_model().to_string())
+        }),
     })
 }
 
 fn get_api_target() -> ApiTarget {
     if let Some(provider_name) = get_config().get_provider()
-        && let Some(target) = custom_provider_target(provider_name, get_model().to_string())
+        && let Some(target) = custom_provider_target(provider_name, None)
     {
         return target;
     }
@@ -154,7 +159,7 @@ fn get_mito_target() -> Result<ApiTarget, String> {
         .provider
         .as_deref()
         .ok_or_else(|| "mito-mode.provider is not configured".to_string())?;
-    let model = mito.model.as_deref().unwrap_or(provider).to_string();
+    let model = mito.model.clone();
     custom_provider_target(provider, model)
         .ok_or_else(|| format!("mito-mode.provider '{provider}' is not in custom_providers"))
 }

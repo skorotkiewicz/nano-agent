@@ -1,5 +1,4 @@
 {
-  "model": "gpt-5.5",
   "provider": "openai-compatible",
   "max_tokens": 4096,
   "temperature": 0.2,
@@ -7,12 +6,14 @@
     "openai-compatible": {
       "provider_type": "openai",
       "base_url": "https://api.openai.com/v1",
-      "api_key": "sk-..."
+      "api_key": "sk-...",
+      "model": "gpt-5.5",
     },
     "local": {
       "provider_type": "openai",
       "base_url": "http://localhost:11434/v1",
-      "api_key": ""
+      "api_key": "",
+      "model": "gemma4",
     }
   },
   "mito-mode": {
