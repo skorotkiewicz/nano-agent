@@ -1362,29 +1362,6 @@ fn get_mito_system() -> String {
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{extract_mito_handoff, strip_mito_prefix};
-
-    #[test]
-    fn strip_mito_prefix_accepts_command_boundary() {
-        assert_eq!(strip_mito_prefix("/mito build this"), Some("build this"));
-        assert_eq!(strip_mito_prefix("  /mito\nbuild this"), Some("build this"));
-        assert_eq!(strip_mito_prefix("/mito"), Some(""));
-        assert_eq!(strip_mito_prefix("/mitochondria"), None);
-    }
-
-    #[test]
-    fn extract_mito_handoff_reads_marker_body() {
-        assert_eq!(
-            extract_mito_handoff("MITO_SEND: implement the feature").as_deref(),
-            Some("implement the feature")
-        );
-        assert_eq!(extract_mito_handoff("MITO_SEND:   "), None);
-        assert_eq!(extract_mito_handoff("ask a question first"), None);
-    }
-}
-
 #[cfg(feature = "acp")]
 async fn run_single_turn(client: &Client, prompt: &str) -> String {
     let format = get_api_target().format;
@@ -1659,5 +1636,28 @@ async fn main() {
         println!("{}", answer);
     } else {
         repl(&client, state, label).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_mito_handoff, strip_mito_prefix};
+
+    #[test]
+    fn strip_mito_prefix_accepts_command_boundary() {
+        assert_eq!(strip_mito_prefix("/mito build this"), Some("build this"));
+        assert_eq!(strip_mito_prefix("  /mito\nbuild this"), Some("build this"));
+        assert_eq!(strip_mito_prefix("/mito"), Some(""));
+        assert_eq!(strip_mito_prefix("/mitochondria"), None);
+    }
+
+    #[test]
+    fn extract_mito_handoff_reads_marker_body() {
+        assert_eq!(
+            extract_mito_handoff("MITO_SEND: implement the feature").as_deref(),
+            Some("implement the feature")
+        );
+        assert_eq!(extract_mito_handoff("MITO_SEND:   "), None);
+        assert_eq!(extract_mito_handoff("ask a question first"), None);
     }
 }
