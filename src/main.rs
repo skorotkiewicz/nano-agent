@@ -913,6 +913,15 @@ async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String>
                 Err(error) => return Some(format!("bad arguments: {error}")),
             };
 
+            // $$info
+            if is_tty() {
+                eprintln!(
+                    "{}",
+                    color("90", &format!("→ delegate_task: {}", task.prompt))
+                );
+            }
+            // $$info /
+
             Some(
                 get_acp_manager()
                     .spawn_agent_for_task(task)
@@ -929,6 +938,15 @@ async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String>
                 Some(values) if !values.is_empty() => values,
                 _ => return Some("bad arguments: tasks must be a non-empty array".to_string()),
             };
+
+            // $$info
+            if is_tty() {
+                eprintln!(
+                    "{}",
+                    color("90", &format!("→ delegate_tasks: {} tasks", values.len()))
+                );
+            }
+            // $$info /
 
             let mut tasks = Vec::new();
             for (index, value) in values.iter().enumerate() {
@@ -1129,6 +1147,19 @@ async fn run_responses(
 
         let mut outputs = Vec::new();
         for call in &calls {
+            // $$info
+            let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            let args = call
+                .get("arguments")
+                .and_then(|a| a.as_str())
+                .unwrap_or("{}");
+            if is_tty() {
+                eprintln!(
+                    "{}",
+                    color("90", &format!("→ tool call: {} {}", name, args))
+                );
+            }
+            // $$info /
             outputs.push(tool_output_responses(call).await);
         }
 
@@ -1265,6 +1296,15 @@ async fn run_chat_with_system(
                 .get("arguments")
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
+
+            // $$info
+            if is_tty() {
+                eprintln!(
+                    "{}",
+                    color("90", &format!("→ tool call: {} {}", name, args_str))
+                );
+            }
+            // $$info /
 
             let output = tool_output_chat(name, args_str, call_id).await;
             messages.push(output);
