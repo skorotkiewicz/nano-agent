@@ -103,3 +103,5 @@ When configured, nano exposes `delegate_task` and `delegate_tasks` to spawn chil
 cargo test
 cargo test --features acp
 ```
+
+$$info
