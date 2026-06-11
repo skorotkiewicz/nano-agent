@@ -160,10 +160,10 @@ impl McpClient {
         {
             let mut servers = self.servers.lock().await;
             if !servers.contains_key(&server_name) {
+                eprintln!("connecting...");
                 let mut server =
                     McpServerHandle::connect(CompactString::new(server_name.clone()), &config)
                         .await?;
-                eprintln!("connecting...");
                 server.list_tools().await?; // Initialize tools
                 servers.insert(server_name.clone(), server);
             }

@@ -2,6 +2,7 @@
 pub mod acp;
 pub mod config;
 pub mod mcp;
+pub mod paths;
 pub mod sandbox;
 
 #[cfg(feature = "acp")]

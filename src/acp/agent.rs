@@ -1,9 +1,11 @@
 use crate::config::{AcpAgentConfig, Config};
+#[cfg(feature = "acp")]
+use crate::paths::{normalize_path, path_is_inside};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 #[cfg(feature = "acp")]
-use std::path::{Component, Path};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
@@ -439,30 +441,6 @@ fn absolutize_path(path: &Path, base: &Path) -> PathBuf {
     };
 
     std::fs::canonicalize(&absolute).unwrap_or_else(|_| normalize_path(&absolute))
-}
-
-#[cfg(feature = "acp")]
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(Path::new("/")),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-#[cfg(feature = "acp")]
-fn path_is_inside(root: &Path, path: &Path) -> bool {
-    let root = normalize_path(root);
-    let path = normalize_path(path);
-    path == root || path.starts_with(root)
 }
 
 #[cfg(all(test, feature = "acp"))]
