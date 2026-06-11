@@ -13,6 +13,16 @@ nano-agent "what's in this repo?"
 
 That's it. Run `nano-agent` with no arguments for an interactive REPL.
 
+## Arch Linux
+
+Install from the AUR with your preferred helper:
+
+```sh
+yay -S nano-agent
+# or
+paru -S nano-agent
+```
+
 ## Usage
 
 ```sh
