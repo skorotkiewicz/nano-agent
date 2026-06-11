@@ -79,7 +79,11 @@ fn shell_cwd_from_args(args: &serde_json::Value) -> Result<PathBuf, String> {
         base
     } else {
         let cwd = PathBuf::from(cwd);
-        if cwd.is_absolute() { cwd } else { base.join(cwd) }
+        if cwd.is_absolute() {
+            cwd
+        } else {
+            base.join(cwd)
+        }
     };
 
     let cwd =

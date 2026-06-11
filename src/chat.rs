@@ -68,7 +68,10 @@ async fn respond_api(
 fn log_tool_call(name: &str, args: &str) {
     // $$info
     if is_tty() {
-        eprintln!("{}", color("90", &format!("→ tool call: {} {}", name, args)));
+        eprintln!(
+            "{}",
+            color("90", &format!("→ tool call: {} {}", name, args))
+        );
     }
     // $$info /
 }

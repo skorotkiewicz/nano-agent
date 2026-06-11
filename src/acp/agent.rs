@@ -3,9 +3,9 @@ use crate::config::{AcpAgentConfig, Config};
 use crate::paths::{normalize_path, path_is_inside};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 #[cfg(feature = "acp")]
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;

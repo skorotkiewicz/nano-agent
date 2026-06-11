@@ -98,7 +98,14 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
         }
 
         let answer = if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
-            run_mito_turn(client, mito_prompt, &mut mito_messages, &mut state, &mut label).await
+            run_mito_turn(
+                client,
+                mito_prompt,
+                &mut mito_messages,
+                &mut state,
+                &mut label,
+            )
+            .await
         } else {
             run_state_turn(client, &prompt, &mut state, &mut label, &prompt).await
         };

@@ -1,9 +1,9 @@
 //! System prompt construction and the doc/skill file finder.
 
 use crate::policy::{acp_allowed_root, expose_execute_shell_tools};
+use crate::state::context_cwd;
 #[cfg(feature = "acp")]
 use crate::state::get_config;
-use crate::state::context_cwd;
 use dirs::home_dir;
 use std::collections::HashMap;
 use std::env;
@@ -19,7 +19,13 @@ const SKIP_DIRS: &[&str] = &[
     "target",
 ];
 
-const DOC_NAMES: &[&str] = &["claude.md", "agent.md", "agents.md", "AGENTS.md", "readme.md"];
+const DOC_NAMES: &[&str] = &[
+    "claude.md",
+    "agent.md",
+    "agents.md",
+    "AGENTS.md",
+    "readme.md",
+];
 
 // Cached per cwd: the prompt embeds the working directory and the docs found
 // under it, and ACP sessions can each have a different cwd.
