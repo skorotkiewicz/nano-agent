@@ -116,7 +116,7 @@ fn build_system(cwd: &Path) -> String {
     let skills = find_files(
         vec![
             ".claude/skills".to_string(),
-            format!("{}/.pi/agent/_skills", home),
+            format!("{}/.pi/agent/skills", home),
         ],
         vec!["skill.md", "skills.md"],
         40,
