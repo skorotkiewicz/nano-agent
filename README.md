@@ -1,4 +1,4 @@
-# nano
+# nano-agent
 
 A tiny shell agent in Rust. Talks to any OpenAI-compatible API, runs commands with your approval, and stays out of the way.
 
