@@ -1,33 +1,51 @@
-# Nano Agent
+# nano
 
-A minimal Rust shell agent with OpenAI-compatible model calls, approval-gated command execution, MCP tools, and optional ACP support.
+A tiny shell agent in Rust. Talks to any OpenAI-compatible API, runs commands with your approval, and stays out of the way.
 
-## Install
+## Quick start
 
 ```sh
 cargo install --path .
+export OPENAI_API_KEY=sk-...
+
+nano-agent "what's in this repo?"
 ```
 
-## Setup
+That's it. Run `nano-agent` with no arguments for an interactive REPL.
 
-Set an API key:
+## Usage
 
 ```sh
-export OPENAI_API_KEY=sk-...
+nano-agent "fix the failing test"   # one-shot prompt
+nano-agent                          # REPL
+nano-agent -c                       # continue last session here
+nano-agent -s                       # pick a recent session
 ```
 
-Or create `~/.config/nano/config.json` or `./nano_config.json`:
+Every command the agent wants to run is shown first:
+
+```
+$ cargo test
+Approve? [y] Approve  [a] Approve All  [n] Deny:
+```
+
+In the REPL: `:q` quits, `:reset` starts over, end a line with `\` for multiline.
+
+## Other models
+
+Point it anywhere with an OpenAI-compatible API:
+
+```sh
+export OPENAI_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+export OPENAI_MODEL=gemma4
+```
+
+Or keep providers in `~/.config/nano/config.json` (or `./nano_config.json`):
 
 ```json
 {
-  "provider": "openai-compatible",
+  "provider": "local",
   "custom_providers": {
-    "openai-compatible": {
-      "provider_type": "openai",
-      "base_url": "https://api.openai.com/v1",
-      "api_key": "sk-...",
-      "model": "gpt-4-turbo"
-    },
     "local": {
       "provider_type": "openai",
       "base_url": "http://localhost:11434/v1",
@@ -38,76 +56,19 @@ Or create `~/.config/nano/config.json` or `./nano_config.json`:
 }
 ```
 
-## Build
+See [example_config.json](example_config.json) for the full format.
 
-```sh
-cargo build
-cargo build --features acp
-```
+## Going further
 
-## Run
+- **MCP tools** — add servers under `mcp_servers` in the config; their tools are exposed to the model automatically.
+- **Planning mode** — prefix a message with `/mito` to talk to a separate local planning agent that prepares a detailed handoff before the main model acts (enable `mito-mode` in the config).
+- **ACP** — build with `--features acp` to run nano as an ACP stdio agent (`nano-agent --acp`) or to delegate subtasks to child agents configured under `acp_agents`. A child's `working_directory` is its sandbox boundary; without one, its tools are disabled.
 
-```sh
-OPENAI_API_KEY=... cargo run -- "inspect this repo"
-cargo run
-cargo run -- -c
-cargo run -- -s
-```
+Useful environment variables: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `NANO_MAX_STEPS`, `NANO_SANDBOX=0` (disable bwrap sandboxing).
 
-`-c` continues the last session in the current directory. `-s` lets you pick a recent session. In the REPL, `:q` quits and `:reset` clears the session.
-
-## Configuration
-
-Config file priority is `~/.config/nano/config.json`, then `./nano_config.json`.
-
-Supported fields:
-
-- `model`
-- `provider`
-- `max_tokens`
-- `temperature`
-- `custom_providers`
-- `mcp_servers`
-- `acp_agents`
-
-Environment:
-
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_MODEL`
-- `NANO_MAX_STEPS`
-
-## ACP
-
-Run nano as an ACP stdio agent:
-
-```sh
-cargo run --features acp -- --acp
-```
-
-Configure child ACP agents in `nano_config.json` or `~/.config/nano/config.json`:
-
-```json
-{
-  "acp_agents": {
-    "worker": {
-      "command": "cargo",
-      "args": ["run", "--features", "acp", "--", "--acp"],
-      "working_directory": "/path/to/project",
-      "timeout_secs": 600
-    }
-  }
-}
-```
-
-When configured, nano exposes `delegate_task` and `delegate_tasks` to spawn child ACP agents.
-`working_directory` is the tool boundary for that child. If it is omitted or null, spawned tools are disabled.
-
-## Test
+## Development
 
 ```sh
 cargo test
 cargo test --features acp
 ```
-
-$$info
