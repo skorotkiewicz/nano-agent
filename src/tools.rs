@@ -290,9 +290,8 @@ async fn execute_shell_tool(args: &serde_json::Value) -> String {
         .get("description")
         .and_then(|d| d.as_str())
         .unwrap_or("");
-    let words = desc.split_whitespace().count();
-    if !(5..=10).contains(&words) {
-        return "bad arguments: description must be 5-10 words".to_string();
+    if desc.trim().is_empty() {
+        return "bad arguments: description is required".to_string();
     }
     if let Err(error) = prepare_shell_execution(args) {
         return error;
