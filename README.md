@@ -20,13 +20,19 @@ Or create `~/.config/nano/config.json` or `./nano_config.json`:
 
 ```json
 {
-  "model": "gpt-4-turbo",
-  "provider": "openrouter",
+  "provider": "openai-compatible",
   "custom_providers": {
-    "openrouter": {
+    "openai-compatible": {
       "provider_type": "openai",
-      "base_url": "https://openrouter.ai/api/v1",
-      "api_key": "sk-or-..."
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-...",
+      "model": "gpt-4-turbo"
+    },
+    "local": {
+      "provider_type": "openai",
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "",
+      "model": "gemma4"
     }
   }
 }
