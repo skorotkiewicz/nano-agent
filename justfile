@@ -42,7 +42,7 @@ remove-hook:
 add-tag:
     #!/usr/bin/env bash
     set -euo pipefail
-    git push origin dev
+    git push origin main
     VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
     git tag -a "v${VERSION}" -m "Release v${VERSION}"
     git push origin "v${VERSION}"
