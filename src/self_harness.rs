@@ -189,13 +189,13 @@ fn parse_candidate_response(response: &str) -> Result<Candidate, String> {
     let (rationale, after_harness) = after_why
         .split_once("HARNESS:")
         .ok_or_else(|| "missing HARNESS marker".to_string())?;
-    let harness = after_harness
-        .split_once("\nEND")
-        .map(|(harness, _)| harness)
-        .unwrap_or(after_harness)
-        .trim()
-        .trim_matches('`')
-        .trim();
+    let harness = strip_fence(
+        after_harness
+            .split_once("\nEND")
+            .map(|(harness, _)| harness)
+            .unwrap_or(after_harness),
+    )
+    .trim();
 
     if harness.is_empty() {
         return Err("empty harness edit".to_string());
@@ -211,6 +211,24 @@ fn parse_candidate_response(response: &str) -> Result<Candidate, String> {
         rationale: rationale.trim().to_string(),
         harness: harness.to_string(),
     })
+}
+
+fn strip_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(without_opening) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let without_lang = without_opening
+        .split_once('\n')
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_opening);
+    without_lang
+        .split_once("\nEND")
+        .map(|(harness, _)| harness)
+        .unwrap_or(without_lang)
+        .trim()
+        .trim_end_matches("```")
+        .trim()
 }
 
 fn evidence_bundle() -> String {
@@ -409,6 +427,15 @@ mod tests {
             parsed.harness,
             "Before final answer, verify required artifacts exist."
         );
+    }
+
+    #[test]
+    fn strips_candidate_markdown_fence() {
+        let parsed = parse_candidate_response(
+            "WHY: too many retries\nHARNESS:\n```markdown\nRetry once.\n```\nEND",
+        )
+        .unwrap();
+        assert_eq!(parsed.harness, "Retry once.");
     }
 
     #[test]
