@@ -66,12 +66,12 @@ impl EditableLine {
     }
 }
 
-struct RawTerminal {
+pub(crate) struct RawTerminal {
     saved_state: String,
 }
 
 impl RawTerminal {
-    fn enter() -> io::Result<Self> {
+    pub(crate) fn enter() -> io::Result<Self> {
         let output = Command::new("stty")
             .arg("-g")
             .stdin(Stdio::inherit())
@@ -103,7 +103,7 @@ impl Drop for RawTerminal {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LineKey {
+pub(crate) enum LineKey {
     Char(char),
     Left,
     Right,
@@ -112,6 +112,7 @@ enum LineKey {
     Backspace,
     Delete,
     Enter,
+    Escape,
     Interrupt,
     Eof,
     Unknown,
@@ -205,7 +206,7 @@ fn read_csi_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey> {
 
 fn read_escape_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey> {
     let Some(byte) = read_optional_byte(stdin)? else {
-        return Ok(LineKey::Unknown);
+        return Ok(LineKey::Escape);
     };
 
     match byte {
@@ -219,7 +220,7 @@ fn read_escape_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey> {
     }
 }
 
-fn read_line_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey> {
+pub(crate) fn read_line_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey> {
     let byte = read_required_byte(stdin)?;
     match byte {
         b'\r' | b'\n' => Ok(LineKey::Enter),
@@ -265,6 +266,7 @@ fn read_tty_line(prompt: &str) -> io::Result<Option<String>> {
                 LineKey::Interrupt => break TtyLineResult::Interrupted,
                 LineKey::Eof if line.chars.is_empty() => break TtyLineResult::Eof,
                 LineKey::Eof => line.delete(),
+                LineKey::Escape => continue,
                 LineKey::Unknown => continue,
             }
             repaint_line(prompt, &line)?;

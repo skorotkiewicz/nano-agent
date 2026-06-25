@@ -21,7 +21,9 @@ pub async fn run_state_turn(
         SessionState::Chat { messages } => run_chat(client, prompt, messages.clone()).await,
     };
 
-    let (answer, prev_id, new_messages) = result;
+    let Ok((answer, prev_id, new_messages)) = result else {
+        return "cancelled".to_string();
+    };
     let session_label = label.as_deref().unwrap_or(label_prompt);
 
     match state {
@@ -49,9 +51,12 @@ pub async fn run_state_turn(
 /// One stateless turn: no session persistence, no conversation carry-over.
 #[cfg(feature = "acp")]
 pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
-    let (answer, _, _) = match get_api_target().format {
+    let result = match get_api_target().format {
         ApiFormat::Responses => run_responses(client, prompt, None).await,
         ApiFormat::ChatCompletions => run_chat(client, prompt, vec![]).await,
     };
-    answer
+    match result {
+        Ok((answer, _, _)) => answer,
+        Err(_) => "cancelled".to_string(),
+    }
 }

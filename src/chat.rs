@@ -5,7 +5,7 @@ use crate::policy::{expose_execute_shell_tools, expose_mcp_tools};
 use crate::prompt::get_system;
 use crate::provider::{ApiTarget, get_api_target};
 use crate::state::{color, get_max_steps, get_mcp_client, is_tty};
-use crate::tools::{dispatch_tool_call, get_tool_chat, get_tool_responses};
+use crate::tools::{ToolCancelled, dispatch_tool_call, get_tool_chat, get_tool_responses};
 #[cfg(feature = "acp")]
 use crate::{
     policy::expose_acp_delegate_tools,
@@ -16,7 +16,17 @@ use std::io::{self, Write};
 use tokio::time::Duration;
 
 /// `(answer, session_id, chat_messages)` for one completed turn.
-pub type TurnOutcome = (String, Option<String>, Option<Vec<serde_json::Value>>);
+pub type TurnOutcome =
+    Result<(String, Option<String>, Option<Vec<serde_json::Value>>), TurnCancelled>;
+
+#[derive(Debug, Clone, Copy)]
+pub struct TurnCancelled;
+
+impl From<ToolCancelled> for TurnCancelled {
+    fn from(_: ToolCancelled) -> Self {
+        Self
+    }
+}
 
 async fn respond_api(
     client: &Client,
@@ -126,7 +136,9 @@ fn text(response: &serde_json::Value) -> String {
         .unwrap_or_default()
 }
 
-async fn tool_output_responses(call: &serde_json::Value) -> serde_json::Value {
+async fn tool_output_responses(
+    call: &serde_json::Value,
+) -> Result<serde_json::Value, ToolCancelled> {
     let call_id = call
         .get("call_id")
         .and_then(|c| c.as_str())
@@ -137,20 +149,20 @@ async fn tool_output_responses(call: &serde_json::Value) -> serde_json::Value {
         .get("arguments")
         .and_then(|a| a.as_str())
         .unwrap_or("{}");
-    let result = dispatch_tool_call(name, args_str).await;
+    let result = dispatch_tool_call(name, args_str).await?;
 
-    serde_json::json!({
+    Ok(serde_json::json!({
         "type": "function_call_output",
         "call_id": call_id,
         "output": result
-    })
+    }))
 }
 
 pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>) -> TurnOutcome {
     let payload = serde_json::json!([{"type": "message", "role": "user", "content": prompt}]);
     let mut response = match respond_responses(client, payload, previous).await {
         Ok(r) => r,
-        Err(e) => return (format!("API Error: {}", e), None, None),
+        Err(e) => return Ok((format!("API Error: {}", e), None, None)),
     };
 
     let mut prev_id = response
@@ -170,7 +182,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
             .unwrap_or_default();
 
         if calls.is_empty() {
-            return (text(&response), prev_id, None);
+            return Ok((text(&response), prev_id, None));
         }
 
         let mut outputs = Vec::new();
@@ -181,7 +193,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
             log_tool_call(name, args);
-            outputs.push(tool_output_responses(call).await);
+            outputs.push(tool_output_responses(call).await?);
         }
 
         response = match respond_responses(
@@ -192,7 +204,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
         .await
         {
             Ok(r) => r,
-            Err(e) => return (format!("API Error: {}", e), prev_id, None),
+            Err(e) => return Ok((format!("API Error: {}", e), prev_id, None)),
         };
         prev_id = response
             .get("id")
@@ -200,7 +212,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
             .map(String::from);
     }
 
-    ("stopped: too many tool calls".to_string(), prev_id, None)
+    Ok(("stopped: too many tool calls".to_string(), prev_id, None))
 }
 
 // --- Chat Completions API Mode ---
@@ -233,14 +245,18 @@ async fn respond_chat_with_target(
     respond_api(client, target, body).await
 }
 
-async fn tool_output_chat(name: &str, args_str: &str, call_id: &str) -> serde_json::Value {
-    let result = dispatch_tool_call(name, args_str).await;
+async fn tool_output_chat(
+    name: &str,
+    args_str: &str,
+    call_id: &str,
+) -> Result<serde_json::Value, ToolCancelled> {
+    let result = dispatch_tool_call(name, args_str).await?;
 
-    serde_json::json!({
+    Ok(serde_json::json!({
         "role": "tool",
         "tool_call_id": call_id,
         "content": result
-    })
+    }))
 }
 
 pub async fn run_chat(
@@ -266,7 +282,7 @@ pub async fn run_chat_with_system(
 
     let mut response = match respond_chat_with_target(client, &messages, target).await {
         Ok(r) => r,
-        Err(e) => return (format!("API Error: {}", e), None, Some(messages)),
+        Err(e) => return Ok((format!("API Error: {}", e), None, Some(messages))),
     };
 
     for _ in 0..get_max_steps() {
@@ -291,11 +307,11 @@ pub async fn run_chat_with_system(
         messages.push(msg);
 
         if tool_calls.is_empty() {
-            return (
+            return Ok((
                 text_content,
                 Some("chat-session".to_string()),
                 Some(messages),
-            );
+            ));
         }
 
         for call in &tool_calls {
@@ -309,25 +325,25 @@ pub async fn run_chat_with_system(
 
             log_tool_call(name, args_str);
 
-            let output = tool_output_chat(name, args_str, call_id).await;
+            let output = tool_output_chat(name, args_str, call_id).await?;
             messages.push(output);
         }
 
         response = match respond_chat_with_target(client, &messages, target).await {
             Ok(r) => r,
             Err(e) => {
-                return (
+                return Ok((
                     format!("API Error: {}", e),
                     Some("chat-session".to_string()),
                     Some(messages),
-                );
+                ));
             }
         };
     }
 
-    (
+    Ok((
         "stopped: too many tool calls".to_string(),
         Some("chat-session".to_string()),
         Some(messages),
-    )
+    ))
 }

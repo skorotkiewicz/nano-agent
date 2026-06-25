@@ -1,6 +1,7 @@
 //! Tool schemas, the user approval prompt, shell execution, and dispatch of
 //! model tool calls (shell, ACP delegation, MCP).
 
+use crate::input::{LineKey, RawTerminal, read_line_key};
 use crate::policy::{expose_mcp_tools, prepare_shell_execution};
 use crate::state::{APPROVE_ALL, acp_mode, color, env_flag_is_false, get_mcp_client};
 #[cfg(feature = "acp")]
@@ -12,10 +13,13 @@ use crate::{
 use nano_agent::acp::AgentTask;
 use nano_agent::sandbox::Sandbox;
 use std::env;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, timeout};
+
+#[derive(Debug, Clone, Copy)]
+pub struct ToolCancelled;
 
 pub fn get_tool_responses() -> &'static serde_json::Value {
     static TOOL: OnceLock<serde_json::Value> = OnceLock::new();
@@ -161,7 +165,45 @@ pub async fn get_acp_delegate_tools_responses() -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn approve_sync(args: &serde_json::Value) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Approval {
+    Approve,
+    ApproveAll,
+    Deny,
+    Cancel,
+}
+
+fn approval_from_line(choice: &str) -> Approval {
+    match choice.trim().to_ascii_lowercase().as_str() {
+        "a" | "all" => Approval::ApproveAll,
+        "y" | "yes" => Approval::Approve,
+        "esc" | "escape" | "cancel" => Approval::Cancel,
+        _ => Approval::Deny,
+    }
+}
+
+fn approval_from_key(key: LineKey) -> Option<Approval> {
+    match key {
+        LineKey::Char('a') | LineKey::Char('A') => Some(Approval::ApproveAll),
+        LineKey::Char('y') | LineKey::Char('Y') => Some(Approval::Approve),
+        LineKey::Char('n') | LineKey::Char('N') | LineKey::Enter => Some(Approval::Deny),
+        LineKey::Escape => Some(Approval::Cancel),
+        _ => None,
+    }
+}
+
+fn read_tty_approval() -> io::Result<Approval> {
+    let _raw = RawTerminal::enter()?;
+    let mut stdin = io::stdin().lock();
+    loop {
+        if let Some(approval) = approval_from_key(read_line_key(&mut stdin)?) {
+            eprintln!();
+            return Ok(approval);
+        }
+    }
+}
+
+fn approve_sync(args: &serde_json::Value) -> Approval {
     eprintln!(
         "\n{}",
         color(
@@ -197,31 +239,30 @@ fn approve_sync(args: &serde_json::Value) -> bool {
     }
 
     if APPROVE_ALL.load(Ordering::SeqCst) {
-        return true;
+        return Approval::Approve;
     }
     if acp_mode() {
-        return true;
+        return Approval::Approve;
     }
 
     eprint!(
-        "Approve? {}  {}  {}: ",
+        "Approve? {}  {}  {}  {}: ",
         color("32", "[y] Approve"),
         color("33", "[a] Approve All"),
-        color("31", "[n] Deny")
+        color("31", "[n] Deny"),
+        color("90", "[Esc] Cancel")
     );
     let _ = io::stderr().flush();
 
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        return read_tty_approval().unwrap_or(Approval::Deny);
+    }
+
     let mut choice = String::new();
     if io::stdin().read_line(&mut choice).is_err() {
-        return false;
+        return Approval::Deny;
     }
-    let choice = choice.trim().to_lowercase();
-
-    if choice == "a" || choice == "all" {
-        APPROVE_ALL.store(true, Ordering::SeqCst);
-        return true;
-    }
-    choice == "y" || choice == "yes"
+    approval_from_line(&choice)
 }
 
 async fn execute_shell(args: &serde_json::Value) -> String {
@@ -285,26 +326,30 @@ fn parse_tool_args(args_str: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(args_str).map_err(|e| format!("bad arguments: {}", e))
 }
 
-async fn execute_shell_tool(args: &serde_json::Value) -> String {
+async fn execute_shell_tool(args: &serde_json::Value) -> Result<String, ToolCancelled> {
     let desc = args
         .get("description")
         .and_then(|d| d.as_str())
         .unwrap_or("");
     if desc.trim().is_empty() {
-        return "bad arguments: description is required".to_string();
+        return Ok("bad arguments: description is required".to_string());
     }
     if let Err(error) = prepare_shell_execution(args) {
-        return error;
+        return Ok(error);
     }
 
     let args_clone = args.clone();
-    let approved = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
+    let approval = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
         .await
-        .unwrap_or(false);
-    if approved {
-        execute_shell(args).await
-    } else {
-        color("31", "denied by user")
+        .unwrap_or(Approval::Deny);
+    match approval {
+        Approval::Approve => Ok(execute_shell(args).await),
+        Approval::ApproveAll => {
+            APPROVE_ALL.store(true, Ordering::SeqCst);
+            Ok(execute_shell(args).await)
+        }
+        Approval::Deny => Ok(color("31", "denied by user")),
+        Approval::Cancel => Err(ToolCancelled),
     }
 }
 
@@ -402,28 +447,47 @@ async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String>
     }
 }
 
-pub async fn dispatch_tool_call(name: &str, args_str: &str) -> String {
+pub async fn dispatch_tool_call(name: &str, args_str: &str) -> Result<String, ToolCancelled> {
     let args = match parse_tool_args(args_str) {
         Ok(args) => args,
-        Err(e) => return e,
+        Err(e) => return Ok(e),
     };
 
     #[cfg(feature = "acp")]
     if let Some(result) = handle_acp_tool(name, &args).await {
-        return result;
+        return Ok(result);
     }
 
     if get_mcp_client().has_tool(name).await {
         if !expose_mcp_tools() {
-            return "denied: MCP tools are disabled in this restricted ACP child".to_string();
+            return Ok("denied: MCP tools are disabled in this restricted ACP child".to_string());
         }
-        get_mcp_client()
+        Ok(get_mcp_client()
             .call_tool(name, args)
             .await
-            .unwrap_or_else(|e| e)
+            .unwrap_or_else(|e| e))
     } else if name == "execute_shell" {
         execute_shell_tool(&args).await
     } else {
-        "unknown tool".to_string()
+        Ok("unknown tool".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Approval, LineKey, approval_from_key, approval_from_line};
+
+    #[test]
+    fn approval_choices_include_cancel() {
+        assert_eq!(approval_from_line("yes"), Approval::Approve);
+        assert_eq!(approval_from_line("all"), Approval::ApproveAll);
+        assert_eq!(approval_from_line("cancel"), Approval::Cancel);
+        assert_eq!(approval_from_line("nope"), Approval::Deny);
+
+        assert_eq!(approval_from_key(LineKey::Escape), Some(Approval::Cancel));
+        assert_eq!(
+            approval_from_key(LineKey::Char('Y')),
+            Some(Approval::Approve)
+        );
     }
 }
