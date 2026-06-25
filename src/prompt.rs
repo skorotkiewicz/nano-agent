@@ -1,6 +1,7 @@
 //! System prompt construction and the doc/skill file finder.
 
 use crate::policy::{acp_allowed_root, expose_execute_shell_tools};
+use crate::self_harness::load_active_harness;
 use crate::state::context_cwd;
 #[cfg(feature = "acp")]
 use crate::state::get_config;
@@ -110,8 +111,18 @@ pub fn get_system() -> String {
         .clone()
 }
 
+pub fn clear_system_cache() {
+    if let Some(cache) = SYSTEM_CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+}
+
 fn build_system(cwd: &Path) -> String {
-    let cwd = cwd.to_str().unwrap_or(".").to_string();
+    let cwd_path = cwd;
+    let cwd = cwd_path.to_str().unwrap_or(".").to_string();
     let home = home_dir()
         .unwrap_or_default()
         .to_str()
@@ -151,6 +162,9 @@ fn build_system(cwd: &Path) -> String {
     } else {
         "Complete the task without tool calls."
     };
+    let harness = load_active_harness(cwd_path)
+        .map(|harness| format!("\nActive self-harness overlay:\n{}", harness))
+        .unwrap_or_default();
 
     format!(
         "{}\n\
@@ -162,7 +176,7 @@ fn build_system(cwd: &Path) -> String {
          platform: {}\n\
          shell: {}\n\
          Important docs (read as needed): {}\n\
-         Important skill files (read as needed): {}",
+         Important skill files (read as needed): {}{}",
         tool_guidance,
         delegation,
         acp_restriction,
@@ -171,6 +185,31 @@ fn build_system(cwd: &Path) -> String {
         env::consts::OS,
         env::var("SHELL").unwrap_or_default(),
         docs,
-        skills
+        skills,
+        harness
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn build_system_includes_active_harness_overlay() {
+        let dir = env::temp_dir().join(format!("nano-agent-harness-test-{}", std::process::id()));
+        let nano_dir = dir.join(".nano");
+        fs::create_dir_all(&nano_dir).unwrap();
+        fs::write(
+            nano_dir.join("harness.md"),
+            "Verify required files before final answer.",
+        )
+        .unwrap();
+
+        let system = build_system(&dir);
+        assert!(system.contains("Active self-harness overlay"));
+        assert!(system.contains("Verify required files before final answer."));
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

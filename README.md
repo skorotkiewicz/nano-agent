@@ -41,6 +41,14 @@ Approve? [y] Approve  [a] Approve All  [n] Deny:
 
 In the REPL: `:q` quits, `:reset` starts over, end a line with `\` for multiline.
 
+Self-harness mode proposes one local prompt overlay from recent session evidence, temporarily installs it, runs your validator, and keeps it only if the validator passes:
+
+```sh
+nano-agent "/self-harness cargo test"
+```
+
+Accepted overlays live at `.nano/harness.md`; rejected and accepted attempts are logged under `.nano/self-harness/`.
+
 ## Other models
 
 Point it anywhere with an OpenAI-compatible API:

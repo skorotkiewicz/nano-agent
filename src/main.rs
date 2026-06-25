@@ -4,6 +4,7 @@ mod mito;
 mod policy;
 mod prompt;
 mod provider;
+mod self_harness;
 mod session;
 mod state;
 mod tools;
@@ -15,6 +16,7 @@ use mito::{run_mito_turn, strip_mito_prefix};
 use nano_agent::acp::{AcpPrompt, AcpServer};
 use provider::{check_api_key, get_api_target};
 use reqwest::Client;
+use self_harness::{run_self_harness, strip_self_harness_prefix};
 use session::{Session, SessionState, pick_session, sessions_in_cwd};
 use state::{color, get_config, get_mcp_client};
 use std::env;
@@ -68,7 +70,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
         color("1", "nano"),
         color(
             "90",
-            "(:q quit, :reset reset, /mito plan, end with \\ for multiline)"
+            "(:q quit, :reset reset, /mito plan, /self-harness <validator>, end with \\ for multiline)"
         ),
         color("90", &get_mcp_client().status())
     );
@@ -97,7 +99,9 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
             continue;
         }
 
-        let answer = if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
+        let answer = if let Some(validation_command) = strip_self_harness_prefix(&prompt) {
+            run_self_harness(client, validation_command).await
+        } else if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
             run_mito_turn(
                 client,
                 mito_prompt,
@@ -178,7 +182,9 @@ async fn main() {
 
     if !prompt.is_empty() {
         let mut mito_messages = Vec::new();
-        let answer = if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
+        let answer = if let Some(validation_command) = strip_self_harness_prefix(&prompt) {
+            run_self_harness(&client, validation_command).await
+        } else if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
             run_mito_turn(
                 &client,
                 mito_prompt,
