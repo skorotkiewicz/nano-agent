@@ -246,7 +246,7 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
     }
 
     eprint!(
-        "Approve? {}  {}  {}  {}: ",
+        "Approve? {}  {}  {}  {} ",
         color("32", "[y] Approve"),
         color("33", "[a] Approve All"),
         color("31", "[n] Deny"),
