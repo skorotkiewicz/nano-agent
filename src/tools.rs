@@ -302,6 +302,8 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
     cmd.envs(current_env);
 
     cmd.stdout(std::process::Stdio::piped());
+    // ponytail: kill_on_drop so timeout abort reaps the child; futures cancel otherwise leaks it
+    cmd.kill_on_drop(true);
 
     let output_result = timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
 

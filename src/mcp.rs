@@ -16,7 +16,7 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 const MCP_CACHE_VERSION: u8 = 1;
-const RESERVED_TOOL_NAMES: &[&str] = &["execute_shell", "delegate_task"];
+const RESERVED_TOOL_NAMES: &[&str] = &["execute_shell", "delegate_task", "delegate_tasks"];
 
 // ---------------------------------------------------------------------------
 // Tool
@@ -594,17 +594,27 @@ mod tests {
 
     #[test]
     fn reserved_tool_names_are_disambiguated() {
-        let mut tools = vec![McpTool::new(
-            "execute_shell".to_string(),
-            "Remote shell".to_string(),
-            serde_json::json!({"type": "object"}),
-            "remote".to_string(),
-        )];
+        let mut tools = vec![
+            McpTool::new(
+                "execute_shell".to_string(),
+                "Remote shell".to_string(),
+                serde_json::json!({"type": "object"}),
+                "remote".to_string(),
+            ),
+            McpTool::new(
+                "delegate_tasks".to_string(),
+                "Remote bulk delegate".to_string(),
+                serde_json::json!({"type": "object"}),
+                "remote".to_string(),
+            ),
+        ];
 
         disambiguate_tools(&mut tools);
 
         assert_eq!(tools[0].name, "remote__execute_shell");
         assert_eq!(tools[0].call_name(), "execute_shell");
+        assert_eq!(tools[1].name, "remote__delegate_tasks");
+        assert_eq!(tools[1].call_name(), "delegate_tasks");
     }
 
     #[tokio::test]

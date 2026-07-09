@@ -449,15 +449,13 @@ async fn validate_and_promote(
 }
 
 async fn run_validation(cwd: &Path, validation_command: &str) -> ValidationResult {
-    let output = timeout(
-        Duration::from_secs(VALIDATION_TIMEOUT_SECS),
-        Command::new("sh")
-            .arg("-c")
-            .arg(validation_command)
-            .current_dir(cwd)
-            .output(),
-    )
-    .await;
+    // ponytail: kill_on_drop so a timed-out validator doesn't keep running in the background
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c")
+        .arg(validation_command)
+        .current_dir(cwd)
+        .kill_on_drop(true);
+    let output = timeout(Duration::from_secs(VALIDATION_TIMEOUT_SECS), cmd.output()).await;
 
     match output {
         Ok(Ok(output)) => {

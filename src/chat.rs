@@ -38,11 +38,20 @@ impl From<ToolCancelled> for TurnCancelled {
     }
 }
 
+/// Reject non-2xx JSON bodies so a 401/429 doesn't look like an empty model reply.
+fn parse_api_json(status: reqwest::StatusCode, body: serde_json::Value) -> Result<serde_json::Value, String> {
+    if status.is_success() {
+        Ok(body)
+    } else {
+        Err(format!("{status} {body}"))
+    }
+}
+
 async fn respond_api(
     client: &Client,
     target: &ApiTarget,
     body: serde_json::Value,
-) -> Result<serde_json::Value, reqwest::Error> {
+) -> Result<serde_json::Value, String> {
     let (tx, mut rx) = tokio::sync::watch::channel(false);
     let spinner_handle = if is_tty() {
         Some(tokio::spawn(async move {
@@ -75,10 +84,13 @@ async fn respond_api(
         req = req.header("Authorization", format!("Bearer {}", target.api_key));
     }
 
-    let res = match req.json(&body).send().await {
-        Ok(http) => http.json().await,
-        Err(e) => Err(e),
-    };
+    let res = async {
+        let http = req.json(&body).send().await.map_err(|e| e.to_string())?;
+        let status = http.status();
+        let body = http.json().await.map_err(|e| e.to_string())?;
+        parse_api_json(status, body)
+    }
+    .await;
 
     let _ = tx.send(true);
     if let Some(h) = spinner_handle {
@@ -103,7 +115,7 @@ async fn respond_responses(
     client: &Client,
     payload: serde_json::Value,
     previous: Option<&str>,
-) -> Result<serde_json::Value, reqwest::Error> {
+) -> Result<serde_json::Value, String> {
     let target = get_api_target();
     let mut tools: Vec<serde_json::Value> = Vec::new();
     if expose_execute_shell_tools() {
@@ -268,11 +280,26 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
 
 // --- Chat Completions API Mode ---
 
+/// Keep the first system message current (harness overlay, diy sandbox policy, cwd).
+fn ensure_system_message(messages: &mut Vec<serde_json::Value>, system: &str) {
+    let system_msg = serde_json::json!({"role": "system", "content": system});
+    if messages
+        .first()
+        .and_then(|m| m.get("role"))
+        .and_then(|r| r.as_str())
+        == Some("system")
+    {
+        messages[0] = system_msg;
+    } else {
+        messages.insert(0, system_msg);
+    }
+}
+
 async fn respond_chat_with_target(
     client: &Client,
     messages: &[serde_json::Value],
     target: &ApiTarget,
-) -> Result<serde_json::Value, reqwest::Error> {
+) -> Result<serde_json::Value, String> {
     let mut tools = Vec::new();
     if expose_execute_shell_tools() {
         tools.push(serde_json::json!({"type": "function", "function": get_tool_chat()}));
@@ -335,9 +362,7 @@ pub async fn run_chat_with_system(
     system: &str,
     target: &ApiTarget,
 ) -> TurnOutcome {
-    if messages.is_empty() {
-        messages.push(serde_json::json!({"role": "system", "content": system}));
-    }
+    ensure_system_message(&mut messages, system);
     messages.push(serde_json::json!({"role": "user", "content": prompt}));
 
     let mut response = match respond_chat_with_target(client, &messages, target).await {
@@ -410,12 +435,41 @@ pub async fn run_chat_with_system(
 
 #[cfg(test)]
 mod tests {
-    use super::TurnCancelled;
+    use super::{TurnCancelled, ensure_system_message, parse_api_json};
     use crate::tools::ToolCancelled;
 
     #[test]
     fn user_tool_cancel_is_silent() {
         let cancelled: TurnCancelled = ToolCancelled::User.into();
         assert!(!cancelled.should_report());
+    }
+
+    #[test]
+    fn api_error_status_is_rejected() {
+        let err = parse_api_json(
+            reqwest::StatusCode::UNAUTHORIZED,
+            serde_json::json!({"error": {"message": "bad key"}}),
+        )
+        .unwrap_err();
+        assert!(err.contains("401"));
+        assert!(err.contains("bad key"));
+
+        assert!(parse_api_json(reqwest::StatusCode::OK, serde_json::json!({"ok": true})).is_ok());
+    }
+
+    #[test]
+    fn ensure_system_message_refreshes_first_system() {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "old"}),
+            serde_json::json!({"role": "user", "content": "hi"}),
+        ];
+        ensure_system_message(&mut messages, "new harness");
+        assert_eq!(messages[0]["content"], "new harness");
+        assert_eq!(messages.len(), 2);
+
+        let mut empty = vec![];
+        ensure_system_message(&mut empty, "fresh");
+        assert_eq!(empty[0]["role"], "system");
+        assert_eq!(empty[0]["content"], "fresh");
     }
 }
