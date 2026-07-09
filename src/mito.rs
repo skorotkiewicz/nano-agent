@@ -19,14 +19,42 @@ pub fn strip_mito_prefix(prompt: &str) -> Option<&str> {
     }
 }
 
+/// Extract the handoff prompt the mito planner emits, if any.
+///
+/// The planner is asked to output exactly one handoff beginning with `MITO_SEND:`.
+/// We accept the prefix in two positions so the model may think out loud first:
+///   1. At the very start of the response (after leading whitespace), or
+///   2. Immediately after a blank line — i.e. `MITO_SEND:` is the first non-blank
+///      line of a paragraph that follows an empty line. This lets the model emit
+///      reasoning/explanation above the handoff without breaking parsing.
+///      Returns `None` if no such prefix is found.
 fn extract_mito_handoff(answer: &str) -> Option<String> {
     const PREFIX: &str = "MITO_SEND:";
-    let handoff = answer.trim_start().strip_prefix(PREFIX)?.trim();
-    if handoff.is_empty() {
-        None
-    } else {
-        Some(handoff.to_string())
+    fn parse_handoff(text: &str) -> Option<String> {
+        let handoff = text.trim();
+        (!handoff.is_empty()).then(|| handoff.to_string())
     }
+
+    let trimmed = answer.trim_start();
+    if let Some(handoff) = trimmed.strip_prefix(PREFIX) {
+        return parse_handoff(handoff);
+    }
+
+    let mut offset = 0;
+    let mut previous_blank = false;
+    for line in answer.split('\n') {
+        let trimmed = line.trim();
+        if previous_blank {
+            let leading = line.len() - line.trim_start().len();
+            if line.trim_start().starts_with(PREFIX) {
+                return parse_handoff(&answer[offset + leading + PREFIX.len()..]);
+            }
+        }
+        previous_blank = trimmed.is_empty();
+        offset += line.len() + 1;
+    }
+
+    None
 }
 
 fn get_mito_system() -> String {
@@ -110,6 +138,18 @@ mod tests {
             Some("implement the feature")
         );
         assert_eq!(extract_mito_handoff("MITO_SEND:   "), None);
+        assert_eq!(
+            extract_mito_handoff("first ask a question\n\nMITO_SEND: implement the feature")
+                .as_deref(),
+            Some("implement the feature")
+        );
+        assert_eq!(
+            extract_mito_handoff(
+                "first ask a question\n\nMITO_SEND: implement the feature\nwith more detail"
+            )
+            .as_deref(),
+            Some("implement the feature\nwith more detail")
+        );
         assert_eq!(
             extract_mito_handoff("first ask a question\nMITO_SEND: implement the feature"),
             None
