@@ -1,10 +1,11 @@
 //! API provider selection: which endpoint, wire format, key, and model to use.
 
 use crate::state::{get_config, get_model};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApiFormat {
     Responses,
     ChatCompletions,
@@ -16,6 +17,16 @@ pub struct ApiTarget {
     pub format: ApiFormat,
     pub api_key: String,
     pub model: String,
+}
+
+fn custom_provider_endpoint(provider_type: &str, base: &str) -> (ApiFormat, String) {
+    match provider_type.trim().to_ascii_lowercase().as_str() {
+        "responses" | "openai-responses" => (ApiFormat::Responses, format!("{}/responses", base)),
+        _ => (
+            ApiFormat::ChatCompletions,
+            format!("{}/chat/completions", base),
+        ),
+    }
 }
 
 pub fn apply_generation_controls(
@@ -60,9 +71,10 @@ fn resolve_api_key(configured: Option<String>, fallback: String) -> String {
 fn custom_provider_target(provider_name: &str, model: Option<String>) -> Option<ApiTarget> {
     let custom = get_config().get_custom_provider(provider_name)?;
     let base = custom.base_url.trim_end_matches('/');
+    let (format, url) = custom_provider_endpoint(&custom.provider_type, base);
     Some(ApiTarget {
-        url: format!("{}/chat/completions", base),
-        format: ApiFormat::ChatCompletions,
+        url,
+        format,
         api_key: resolve_api_key(
             custom.api_key.clone(),
             env::var("OPENAI_API_KEY").unwrap_or_default(),
@@ -118,7 +130,7 @@ pub fn get_mito_target() -> Result<ApiTarget, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiFormat, apply_generation_controls, resolve_api_key};
+    use super::{ApiFormat, apply_generation_controls, custom_provider_endpoint, resolve_api_key};
 
     #[test]
     fn responses_use_max_output_tokens() {
@@ -148,5 +160,12 @@ mod tests {
             resolve_api_key(Some(String::new()), "env-key".to_string()),
             ""
         );
+    }
+
+    #[test]
+    fn provider_type_can_select_responses_endpoint() {
+        let (format, url) = custom_provider_endpoint("responses", "http://localhost:1234/v1");
+        assert_eq!(format, ApiFormat::Responses);
+        assert_eq!(url, "http://localhost:1234/v1/responses");
     }
 }

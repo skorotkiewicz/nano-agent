@@ -2,8 +2,9 @@
 //! persist the resulting session state.
 
 use crate::chat::{run_chat, run_responses};
+use crate::provider::ApiFormat;
 #[cfg(feature = "acp")]
-use crate::provider::{ApiFormat, get_api_target};
+use crate::provider::get_api_target;
 use crate::session::{SessionState, append_session_messages, save_session};
 use crate::state::color;
 use reqwest::Client;
@@ -37,13 +38,18 @@ pub async fn run_state_turn(
         SessionState::Responses { previous, messages } => {
             if let Some(ref id) = prev_id {
                 let merged_messages = append_session_messages(messages, new_messages);
-                save_session(id, session_label, merged_messages);
+                save_session(id, session_label, ApiFormat::Responses, merged_messages);
             }
             *previous = prev_id;
         }
         SessionState::Chat { messages } => {
             if let Some(msgs) = new_messages {
-                save_session("chat-session", session_label, Some(msgs.clone()));
+                save_session(
+                    "chat-session",
+                    session_label,
+                    ApiFormat::ChatCompletions,
+                    Some(msgs.clone()),
+                );
                 *messages = msgs;
             }
         }

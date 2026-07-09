@@ -24,6 +24,18 @@ pub enum ToolCancelled {
     User,
 }
 
+fn truncate_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
 pub fn get_tool_responses() -> &'static serde_json::Value {
     static TOOL: OnceLock<serde_json::Value> = OnceLock::new();
     TOOL.get_or_init(|| {
@@ -313,7 +325,7 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
             let stdout = String::from_utf8_lossy(&output.stdout);
             res.push_str(&stdout);
             if res.len() > 12000 {
-                res = res[res.len() - 12000..].to_string();
+                res = truncate_tail(&res, 12000);
             }
             res
         }
@@ -472,7 +484,7 @@ pub async fn dispatch_tool_call(name: &str, args_str: &str) -> Result<String, To
 
 #[cfg(test)]
 mod tests {
-    use super::{Approval, LineKey, approval_from_key, approval_from_line};
+    use super::{Approval, LineKey, approval_from_key, approval_from_line, truncate_tail};
 
     #[test]
     fn approval_choices_include_cancel() {
@@ -486,5 +498,10 @@ mod tests {
             approval_from_key(LineKey::Char('Y')),
             Some(Approval::Approve)
         );
+    }
+
+    #[test]
+    fn truncate_tail_respects_utf8_boundaries() {
+        assert_eq!(truncate_tail("prefix-ébc", 4), "ébc");
     }
 }

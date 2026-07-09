@@ -133,6 +133,28 @@ fn resume_last_session() -> Session {
     last
 }
 
+fn ensure_session_format(current: provider::ApiFormat, session: &Session) {
+    let saved = session.resolved_format();
+    if saved == current {
+        return;
+    }
+
+    let current_name = match current {
+        provider::ApiFormat::Responses => "Responses API",
+        provider::ApiFormat::ChatCompletions => "Chat Completions API",
+    };
+    let saved_name = match saved {
+        provider::ApiFormat::Responses => "Responses API",
+        provider::ApiFormat::ChatCompletions => "Chat Completions API",
+    };
+
+    eprintln!(
+        "cannot resume session '{}' created with {}; current configuration uses {}",
+        session.label, saved_name, current_name
+    );
+    std::process::exit(1);
+}
+
 #[tokio::main]
 async fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -173,6 +195,7 @@ async fn main() {
     match flag.as_deref() {
         Some("-s") => {
             if let Some(session) = pick_session() {
+                ensure_session_format(format, &session);
                 eprintln!("{}", color("90", &format!("resuming: {}", session.label)));
                 label = Some(session.label.clone());
                 state = SessionState::resume(format, session);
@@ -180,6 +203,7 @@ async fn main() {
         }
         Some("-c") => {
             let last = resume_last_session();
+            ensure_session_format(format, &last);
             eprintln!("{}", color("90", &format!("continuing: {}", last.label)));
             label = Some(last.label.clone());
             state = SessionState::resume(format, last);

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 use super::server::McpServerHandle;
@@ -26,6 +27,20 @@ pub struct McpClient {
     cache_path: PathBuf,
     total_servers: Arc<Mutex<usize>>,
     server_configs: Arc<Mutex<HashMap<String, McpServerConfig>>>,
+    refresh_needed: Arc<AtomicBool>,
+}
+
+impl Clone for McpClient {
+    fn clone(&self) -> Self {
+        Self {
+            servers: Arc::clone(&self.servers),
+            tools: Arc::clone(&self.tools),
+            cache_path: self.cache_path.clone(),
+            total_servers: Arc::clone(&self.total_servers),
+            server_configs: Arc::clone(&self.server_configs),
+            refresh_needed: Arc::clone(&self.refresh_needed),
+        }
+    }
 }
 
 impl McpClient {
@@ -41,12 +56,12 @@ impl McpClient {
             cache_path,
             total_servers: Arc::new(Mutex::new(0)),
             server_configs: Arc::new(Mutex::new(HashMap::new())),
+            refresh_needed: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn load_servers(&self, config: &Config) {
         *self.total_servers.lock().await = config.mcp_servers.len();
-        let total = *self.total_servers.lock().await;
         let fingerprint = mcp_cache_fingerprint(config);
 
         {
@@ -56,23 +71,33 @@ impl McpClient {
                 configs.insert(name.clone(), server_config.clone());
             }
         }
-        self.tools.lock().await.clear();
         self.servers.lock().await.clear();
 
         if let Some(cached_tools) = Self::load_from_cache(&self.cache_path, &fingerprint).await {
-            self.tools.lock().await.extend(cached_tools);
+            let mut tools = self.tools.lock().await;
+            tools.clear();
+            tools.extend(cached_tools);
+            self.refresh_needed.store(true, Ordering::SeqCst);
             return;
         }
 
+        self.tools.lock().await.clear();
+        self.refresh_needed.store(false, Ordering::SeqCst);
+        self.refresh_servers(config.clone(), false).await;
+    }
+
+    async fn refresh_servers(&self, config: Config, keep_cached_on_total_failure: bool) {
+        let total = config.mcp_servers.len();
         let mut connected = 0;
         let mut loaded_tools = Vec::new();
+        let mut live_servers = HashMap::new();
         for (name, server_config) in &config.mcp_servers {
             eprintln!("\rconnecting... {}/{}", connected + 1, total);
             match McpServerHandle::connect(CompactString::new(name.clone()), server_config).await {
                 Ok(mut server) => match server.list_tools().await {
                     Ok(tools) => {
                         loaded_tools.extend(tools);
-                        self.servers.lock().await.insert(name.clone(), server);
+                        live_servers.insert(name.clone(), server);
                         connected += 1;
                     }
                     Err(e) => {
@@ -85,9 +110,22 @@ impl McpClient {
             }
         }
 
+        if connected == 0 && keep_cached_on_total_failure {
+            return;
+        }
+
         disambiguate_tools(&mut loaded_tools);
+        *self.servers.lock().await = live_servers;
         *self.tools.lock().await = loaded_tools;
-        self.save_to_cache(&fingerprint).await;
+        self.refresh_needed.store(false, Ordering::SeqCst);
+        self.save_to_cache(&mcp_cache_fingerprint(&config)).await;
+    }
+
+    async fn config_snapshot(&self) -> Config {
+        Config {
+            mcp_servers: self.server_configs.lock().await.clone(),
+            ..Default::default()
+        }
     }
 
     pub fn status(&self) -> String {
@@ -144,6 +182,7 @@ impl McpClient {
     }
 
     pub async fn call_tool(&self, name: &str, args: Value) -> Result<String, String> {
+        let trigger_refresh = self.refresh_needed.swap(false, Ordering::SeqCst);
         let (server_name, config, call_name) = {
             let tools = self.tools.lock().await;
             let tool = tools
@@ -180,7 +219,18 @@ impl McpClient {
             .get_mut(&server_name)
             .ok_or_else(|| "server not found".to_string())?;
 
-        server.call_tool(&call_name, args).await
+        let result = server.call_tool(&call_name, args).await;
+        drop(servers);
+
+        if trigger_refresh {
+            let client = self.clone();
+            let config = self.config_snapshot().await;
+            tokio::spawn(async move {
+                client.refresh_servers(config, true).await;
+            });
+        }
+
+        result
     }
 }
 
@@ -292,6 +342,7 @@ mod tests {
     use super::{disambiguate_tools, mcp_cache_fingerprint};
     use crate::config::Config;
     use crate::mcp::McpTool;
+    use std::path::PathBuf;
 
     #[test]
     fn cache_fingerprint_changes_when_mcp_config_changes() {
@@ -370,5 +421,52 @@ mod tests {
 
         assert_eq!(tools[0].name, "remote__execute_shell");
         assert_eq!(tools[0].call_name(), "execute_shell");
+    }
+
+    #[tokio::test]
+    async fn cache_hit_loads_tools_without_connecting_and_arms_lazy_refresh() {
+        let mut client = super::McpClient::new();
+        client.cache_path = std::env::temp_dir().join(format!(
+            "nano-agent-mcp-cache-test-{}.json",
+            std::process::id()
+        ));
+
+        let config: Config = serde_json::from_str(
+            r#"{
+                "mcp_servers": {
+                    "docs": {
+                        "command": "definitely-not-a-real-command"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let fingerprint = mcp_cache_fingerprint(&config);
+        let cache = serde_json::json!({
+            "version": 1,
+            "fingerprint": fingerprint,
+            "tools": [{
+                "name": "search",
+                "description": "cached",
+                "parameters": {"type": "object"},
+                "server_name": "docs"
+            }]
+        });
+        std::fs::write(&client.cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+
+        client.load_servers(&config).await;
+
+        let tool_names = client
+            .tools
+            .lock()
+            .await
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(tool_names, vec!["search".to_string()]);
+        assert!(client.servers.lock().await.is_empty());
+        assert!(client.refresh_needed.load(std::sync::atomic::Ordering::SeqCst));
+
+        let _ = std::fs::remove_file(PathBuf::from(&client.cache_path));
     }
 }

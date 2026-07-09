@@ -19,6 +19,8 @@ pub struct Session {
     pub cwd: String,
     pub ts: i64,
     #[serde(default)]
+    pub format: Option<ApiFormat>,
+    #[serde(default)]
     pub messages: Option<Vec<Value>>,
 }
 
@@ -53,6 +55,18 @@ impl SessionState {
                 messages: session.messages.unwrap_or_default(),
             },
         }
+    }
+}
+
+impl Session {
+    pub fn resolved_format(&self) -> ApiFormat {
+        self.format.unwrap_or_else(|| {
+            if self.id == "chat-session" {
+                ApiFormat::ChatCompletions
+            } else {
+                ApiFormat::Responses
+            }
+        })
     }
 }
 
@@ -97,7 +111,12 @@ pub fn append_session_messages(
     (!existing.is_empty()).then(|| existing.clone())
 }
 
-pub fn save_session(response_id: &str, label: &str, messages: Option<Vec<Value>>) {
+pub fn save_session(
+    response_id: &str,
+    label: &str,
+    format: ApiFormat,
+    messages: Option<Vec<Value>>,
+) {
     let mut sessions = load_sessions();
     let cwd = current_cwd_string();
 
@@ -111,6 +130,7 @@ pub fn save_session(response_id: &str, label: &str, messages: Option<Vec<Value>>
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64,
+        format: Some(format),
         messages,
     });
 
@@ -169,7 +189,8 @@ pub fn pick_session() -> Option<Session> {
 
 #[cfg(test)]
 mod tests {
-    use super::append_session_messages;
+    use super::{Session, append_session_messages};
+    use crate::provider::ApiFormat;
 
     #[test]
     fn append_session_messages_keeps_prior_turns() {
@@ -186,5 +207,19 @@ mod tests {
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0]["content"], "first");
         assert_eq!(merged[1]["content"], "second");
+    }
+
+    #[test]
+    fn legacy_chat_session_id_resolves_to_chat_completions() {
+        let session = Session {
+            id: "chat-session".to_string(),
+            label: "test".to_string(),
+            cwd: ".".to_string(),
+            ts: 0,
+            format: None,
+            messages: None,
+        };
+
+        assert_eq!(session.resolved_format(), ApiFormat::ChatCompletions);
     }
 }
