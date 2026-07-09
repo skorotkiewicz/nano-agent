@@ -40,6 +40,8 @@ fn print_usage() {
          REPL:\n\
            :q / quit / exit   quit\n\
            :reset             clear history and mito context\n\
+           :config            print effective config\n\
+           :help              this help\n\
            /mito ...          local planner handoff\n\
            /self-harness <cmd> propose/keep harness after validator passes\n\
            line ending with \\ continues multiline input\n\n\
@@ -119,27 +121,24 @@ async fn run_acp_server() -> Result<(), String> {
 }
 
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
+    let target = get_api_target();
+    let sandbox = nano_agent::sandbox::SandboxMode::from_env_value(
+        std::env::var("NANO_SANDBOX").ok().as_deref(),
+    )
+    .label();
+    // One quiet banner line — dense, not chatty.
     eprintln!(
-        "{} repl {} mcp: {}",
+        "{}  {}  sandbox:{}  {}",
         color("1", "nano"),
-        color(
-            "90",
-            "(:q quit, :reset reset, /mito plan, /self-harness <validator>, end with \\ for multiline)"
-        ),
+        color("90", &target.model),
+        color("90", sandbox),
         color("90", &get_mcp_client().status())
     );
     eprintln!(
         "{}",
         color(
             "90",
-            &format!(
-                "sandbox: {}  model: {}",
-                nano_agent::sandbox::SandboxMode::from_env_value(
-                    std::env::var("NANO_SANDBOX").ok().as_deref()
-                )
-                .label(),
-                get_api_target().model
-            )
+            ":q quit · :reset · /mito · /self-harness · \\ multiline · -h help"
         )
     );
     let stdin = BufReader::new(tokio::io::stdin());
@@ -164,6 +163,14 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
             label = None;
             mito_messages.clear();
             eprintln!("{}", color("90", "reset"));
+            continue;
+        }
+        if lower == ":config" || lower == "config" {
+            print_effective_config();
+            continue;
+        }
+        if lower == ":help" || lower == "help" {
+            print_usage();
             continue;
         }
 

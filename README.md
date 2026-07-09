@@ -1,107 +1,98 @@
 # nano-agent
 
-A tiny shell agent in Rust. Talks to any OpenAI-compatible API, runs commands with your approval, and stays out of the way.
-
-## Quick start
+A tiny shell agent. Talks to any OpenAI-compatible API, runs commands **you approve**, stays out of the way.
 
 ```sh
 cargo install --path .
 export OPENAI_API_KEY=sk-...
-
 nano-agent "what's in this repo?"
 ```
 
-That's it. Run `nano-agent` with no arguments for an interactive REPL.
+No args → REPL. That's the product.
 
-## Arch Linux
+## Shape
 
-Install from the AUR with your preferred helper:
-
-```sh
-yay -S nano-agent
-# or
-paru -S nano-agent
 ```
+you → model → execute_shell? → you approve → bwrap → output → model → answer
+```
+
+No plugin system. No second UI. One tool that matters, plus optional MCP/ACP if you ask for them.
 
 ## Usage
 
 ```sh
-nano-agent "fix the failing test"   # one-shot prompt
+nano-agent "fix the failing test"   # one-shot
 nano-agent                          # REPL
 nano-agent -c                       # continue last session here
 nano-agent -s                       # pick a recent session
-nano-agent --show-config            # resolved provider/model/sandbox
+nano-agent --show-config
 nano-agent --help
 ```
 
-Every command the agent wants to run is shown first:
+Approval for each command:
 
 ```
-$ cargo test
-Approve? [y] Approve  [a] Approve All  [s] Safe  [n] Deny  [Esc] Cancel:
+# list rust sources
+$ rg --files -t rust  [safe]
+  [y]  [a]all  [s]safe  [n]  [esc] ·
 ```
 
-`[s] Safe` auto-approves later read-only-looking commands this turn (`ls`, `git status`, `cargo test`, `rg`, …). Risky / compound commands still ask.
+| Key | Meaning |
+|-----|---------|
+| `y` | run this once |
+| `a` | run **all** remaining this turn |
+| `s` | run this + auto-ok **safe** patterns (`ls`, `git status`, `cargo test`, `rg`, …) |
+| `n` / Esc | deny / cancel turn |
 
-In the REPL: `:q` quits, `:reset` starts over, end a line with `\` for multiline.
-
-Self-harness mode proposes one local prompt overlay from recent session evidence, temporarily installs it, runs your validator, and keeps it only if the validator passes:
-
-```sh
-nano-agent "/self-harness cargo test"
-```
-
-Accepted overlays live at `.nano/harness.md`; rejected and accepted attempts are logged under `.nano/self-harness/`.
+REPL: `›` prompt · `:q` · `:reset` · `:config` · `/mito` · `/self-harness <validator>` · line ending `\` continues.
 
 ## Other models
 
-Point it anywhere with an OpenAI-compatible API:
-
 ```sh
-export OPENAI_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
+export OPENAI_BASE_URL=http://localhost:11434/v1   # Ollama
 export OPENAI_MODEL=gemma4
-# no API key required for localhost endpoints
+# localhost needs no API key
 ```
 
-Or keep providers in `~/.config/nano/config.json` (or `./nano_config.json`):
+Or `~/.config/nano/config.json` / `./nano_config.json` (local overlays global). See [example_config.json](example_config.json).
 
-```json
-{
-  "provider": "local",
-  "custom_providers": {
-    "local": {
-      "provider_type": "openai",
-      "base_url": "http://localhost:11434/v1",
-      "api_key": "",
-      "model": "gemma4"
-    }
-  }
-}
-```
-
-See [example_config.json](example_config.json) for the full format.
-
-## Going further
-
-- **MCP tools** — add servers under `mcp_servers` in the config; their tools are exposed to the model automatically.
-- **Planning mode** — prefix a message with `/mito` to talk to a separate local planning agent that prepares a detailed handoff before the main model acts (enable `mito-mode` in the config).
-- **ACP** — build with `--features acp` to run nano as an ACP stdio agent (`nano-agent --acp`) or to delegate subtasks to child agents configured under `acp_agents`. A child's `working_directory` is its sandbox boundary; without one, its tools are disabled.
-
-Useful environment variables:
+## Env
 
 | Variable | Meaning |
 |----------|---------|
-| `OPENAI_API_KEY` | API key (or set on a custom provider) |
-| `OPENAI_BASE_URL` | OpenAI-compatible base URL (uses chat-completions) |
-| `OPENAI_MODEL` | Model id |
-| `NANO_MAX_STEPS` | Tool-loop cap (default 200) |
-| `NANO_SANDBOX` | `off` / `0` — no bwrap; `fs` (default) — isolate FS, no net; `fs+net` — isolate FS, share network |
+| `OPENAI_API_KEY` | required unless provider has a key or endpoint is localhost |
+| `OPENAI_BASE_URL` | OpenAI-compatible base → chat-completions |
+| `OPENAI_MODEL` | model id |
+| `NANO_MAX_STEPS` | tool-loop cap (default 200) |
+| `NANO_SANDBOX` | `off` · `fs` (default, no net) · `fs+net` |
 
-Also see [ROADMAP.md](ROADMAP.md).
+## Optional extras
 
-## Development
+- **MCP** — `mcp_servers` in config
+- **mito** — `/mito` local planner (needs `mito-mode` + chat-completions provider)
+- **self-harness** — `/self-harness cargo test` proposes `.nano/harness.md` if validator passes
+- **ACP** — `--features acp` → `nano-agent --acp` and child agents under `acp_agents`
+
+## Design (why this, not AutoGPT)
+
+1. **Trust boundary is the human.** Every shell line is visible; risk-tagged (`safe` / `write` / `danger`).
+2. **One primary tool.** Multi-tool dragons hide failure modes.
+3. **Short system prompt.** Procedures the model can follow, not a novel.
+4. **Session resume that fails loud.** Format mismatch → start fresh, don't half-context.
+5. **Sandbox with a name.** `fs` vs `fs+net` vs `off` — isolation is a policy, not a mystery.
+
+See [ROADMAP.md](ROADMAP.md) and [changelog.md](changelog.md).
+
+## Dev
 
 ```sh
 cargo test
 cargo test --features acp
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
+## Arch
+
+```sh
+yay -S nano-agent
 ```

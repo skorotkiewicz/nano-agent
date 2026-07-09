@@ -55,7 +55,9 @@ pub fn find_files(roots: Vec<String>, names: Vec<&str>, limit: usize) -> String 
             continue;
         }
 
+        // ponytail: cap depth — full-tree scans kill startup on monorepos
         for entry in walkdir::WalkDir::new(&root_path)
+            .max_depth(5)
             .into_iter()
             .filter_entry(|e| {
                 e.file_name()
@@ -133,64 +135,57 @@ fn build_system(cwd: &Path) -> String {
         .unwrap_or("")
         .to_string();
 
-    let docs = find_files(vec![cwd.clone()], doc_names(), 40);
+    let docs = find_files(vec![cwd.clone()], doc_names(), 12);
     let skills = find_files(
         vec![
             ".claude/skills".to_string(),
             format!("{}/.pi/agent/skills", home),
         ],
         vec!["skill.md", "skills.md"],
-        40,
+        12,
     );
     #[cfg(feature = "acp")]
-    let delegation = if !get_config().acp_agents.is_empty() {
-        " Use delegate_task or delegate_tasks to spawn configured ACP child agents for independent subtasks."
+    let delegation: &str = if !get_config().acp_agents.is_empty() {
+        "\n- delegate_task / delegate_tasks: spawn configured ACP child agents for independent subtasks."
     } else {
         ""
     };
     #[cfg(not(feature = "acp"))]
-    let delegation = "";
-    let tool_guidance = if expose_execute_shell_tools() {
-        "You are Nano, a general-purpose shell agent with a primary tool: execute_shell.\n\
-         When user asks for shell commands, ALWAYS make a tool_call to execute_shell\n\
-         Use it to inspect, edit, install, test, search, automate, and answer."
-    } else {
-        "You are Nano, a general-purpose shell agent. Local shell and MCP tools are disabled in this restricted ACP session.\n\
-         Answer from the prompt and provided context only."
-    };
+    let delegation: &str = "";
     let acp_restriction = acp_allowed_root()
-        .map(|root| format!(" Local shell commands must stay under {}.", root.display()))
+        .map(|root| format!("\nShell cwd must stay under {}.", root.display()))
         .unwrap_or_default();
-    let persistence = if expose_execute_shell_tools() {
-        "Keep taking shell steps until done or blocked."
-    } else {
-        "Complete the task without tool calls."
-    };
     let harness = load_active_harness(cwd_path)
-        .map(|harness| format!("\nActive self-harness overlay:\n{}", harness))
+        .map(|harness| format!("\n\n# Local harness\n{harness}"))
         .unwrap_or_default();
 
+    if !expose_execute_shell_tools() {
+        return format!(
+            "You are Nano in a restricted ACP session. Shell and MCP tools are off.\n\
+             Answer from the prompt and context only. Be brief.\n\
+             cwd: {cwd}\nplatform: {}{acp_restriction}{harness}",
+            env::consts::OS,
+        );
+    }
+
     format!(
-        "{}\n\
-         {}{}\n\
-         Be concise, tenacious, and relentlessly useful. {}\n\
-         Output short plain-text snippets optimized for terminal reading; no markdown rendering or syntax highlighting.\n\
-         Never run destructive commands unless explicitly requested.\n\
-         cwd: {}\n\
+        "You are Nano, a shell agent in a real terminal.\n\
+         \n\
+         # How you work\n\
+         - Primary tool: execute_shell. For any inspect/edit/run/test/search, call it — do not invent results.\n\
+         - description: 5–10 words of why, not a second command.\n\
+         - Prefer small read steps first, then change only what the user asked for.\n\
+         - Never destroy data (rm -rf, reset --hard, push --force, drop tables) unless the user explicitly asked.\n\
+         - Keep going until the task is done or blocked by deny/error; then stop and say what is left.\n\
+         - Answer in short plain terminal text. No markdown chrome, no songs, no filler.{delegation}{acp_restriction}\n\
+         \n\
+         cwd: {cwd}\n\
          platform: {}\n\
          shell: {}\n\
-         Important docs (read as needed): {}\n\
-         Important skill files (read as needed): {}{}",
-        tool_guidance,
-        delegation,
-        acp_restriction,
-        persistence,
-        cwd,
+         docs (read if useful): {docs}\n\
+         skills (read if useful): {skills}{harness}",
         env::consts::OS,
         env::var("SHELL").unwrap_or_default(),
-        docs,
-        skills,
-        harness
     )
 }
 
@@ -211,8 +206,9 @@ mod tests {
         .unwrap();
 
         let system = build_system(&dir);
-        assert!(system.contains("Active self-harness overlay"));
+        assert!(system.contains("Local harness"));
         assert!(system.contains("Verify required files before final answer."));
+        assert!(system.contains("You are Nano"));
 
         let _ = fs::remove_dir_all(dir);
     }

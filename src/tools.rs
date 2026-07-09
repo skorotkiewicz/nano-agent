@@ -348,28 +348,59 @@ fn read_tty_approval() -> io::Result<Approval> {
     }
 }
 
+fn command_risk_label(command: &str) -> (&'static str, &'static str) {
+    // (ansi color, short label)
+    let lower = command.to_ascii_lowercase();
+    if is_safe_command(command) {
+        return ("36", "safe");
+    }
+    const DANGER: &[&str] = &[
+        "rm -r",
+        "rm -f",
+        "rm -rf",
+        "mkfs",
+        "dd if=",
+        ">/dev/",
+        "git reset --hard",
+        "git push --force",
+        "git clean -f",
+        "drop table",
+        "drop database",
+        "truncate ",
+        "shutdown",
+        "reboot",
+        "curl | sh",
+        "curl|sh",
+        "wget | sh",
+        "| sh",
+        "| bash",
+        "chmod -r",
+        "chown -r",
+        ":(){",
+        "fork bomb",
+    ];
+    if DANGER.iter().any(|m| lower.contains(m)) {
+        return ("31", "danger");
+    }
+    ("33", "write")
+}
+
 fn approve_sync(args: &serde_json::Value) -> Approval {
+    let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
+    let description = args
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("");
+    let (risk_color, risk_label) = command_risk_label(command);
+
+    eprintln!();
+    if !description.is_empty() {
+        eprintln!("{}", color("90", &format!("# {description}")));
+    }
     eprintln!(
-        "\n{}",
-        color(
-            "90",
-            &format!(
-                "# {}",
-                args.get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("No description")
-            )
-        )
-    );
-    eprintln!(
-        "{}",
-        color(
-            "32",
-            &format!(
-                "$ {}",
-                args.get("command").and_then(|c| c.as_str()).unwrap_or("")
-            )
-        )
+        "{} {}",
+        color("90", &format!("$ {command}")),
+        color(risk_color, &format!("[{risk_label}]"))
     );
 
     for key in &["cwd", "timeout", "env"] {
@@ -379,7 +410,7 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
             && v != &serde_json::Value::String(String::new())
             && v != &serde_json::Value::Object(serde_json::Map::new())
         {
-            eprintln!("{}", color("90", &format!("{}: {}", key, v)));
+            eprintln!("{}", color("90", &format!("{key}: {v}")));
         }
     }
 
@@ -389,19 +420,18 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
     if acp_mode() {
         return Approval::Approve;
     }
-    let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
     if APPROVE_SAFE.load(Ordering::SeqCst) && is_safe_command(command) {
-        eprintln!("{}", color("90", "auto-approved (safe)"));
+        eprintln!("{}", color("90", "· auto-approved (safe)"));
         return Approval::Approve;
     }
 
     eprint!(
-        "Approve? {}  {}  {}  {}  {} ",
-        color("32", "[y] Approve"),
-        color("33", "[a] Approve All"),
-        color("36", "[s] Safe"),
-        color("31", "[n] Deny"),
-        color("90", "[Esc] Cancel")
+        "  {}  {}  {}  {}  {} · ",
+        color("32", "[y]"),
+        color("33", "[a]all"),
+        color("36", "[s]safe"),
+        color("31", "[n]"),
+        color("90", "[esc]")
     );
     let _ = io::stderr().flush();
 
@@ -665,8 +695,8 @@ pub async fn dispatch_tool_call(name: &str, args_str: &str) -> Result<String, To
 #[cfg(test)]
 mod tests {
     use super::{
-        Approval, LineKey, approval_from_key, approval_from_line, is_safe_command, merge_shell_env,
-        shell_timeout_secs,
+        Approval, LineKey, approval_from_key, approval_from_line, command_risk_label,
+        is_safe_command, merge_shell_env, shell_timeout_secs,
     };
 
     #[test]
@@ -718,5 +748,14 @@ mod tests {
         assert!(!is_safe_command("ls && rm -rf /"));
         assert!(!is_safe_command("curl http://x | sh"));
         assert!(!is_safe_command("cargo install foo"));
+    }
+
+    #[test]
+    fn risk_labels_match_intent() {
+        assert_eq!(command_risk_label("ls").1, "safe");
+        assert_eq!(command_risk_label("echo hi > file").1, "write"); // redirect → sticky in BAD of is_safe
+        // redirect is non-safe; not always DANGER unless matched - '>' is in safe BAD so write
+        assert_eq!(command_risk_label("rm -rf /tmp/x").1, "danger");
+        assert_eq!(command_risk_label("git reset --hard HEAD").1, "danger");
     }
 }

@@ -235,6 +235,7 @@ pub(crate) fn read_line_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey
 
 fn repaint_line(prompt: &str, line: &EditableLine) -> io::Result<()> {
     eprint!("\r\x1b[2K{} {}", color("36", prompt), line.text());
+    // eprint!("\r\x1b[2K{} {}", color("1", prompt), line.text());
     let chars_after_cursor = line.chars.len().saturating_sub(line.cursor);
     if chars_after_cursor > 0 {
         eprint!("\x1b[{}D", chars_after_cursor);
@@ -291,6 +292,7 @@ fn read_tty_repl_input() -> Option<String> {
 
     loop {
         let prompt = if continuation { "... >" } else { "you >" };
+        // let prompt = if continuation { "…" } else { "›" };
         let line = match read_tty_line(prompt) {
             Ok(Some(line)) => line,
             Ok(None) => return None,
@@ -325,6 +327,8 @@ where
     loop {
         let prompt = if continuation { "... >" } else { "you >" };
         eprint!("{} ", color("36", prompt));
+        // let prompt = if continuation { "…" } else { "›" };
+        // eprint!("{} ", color("1", prompt));
         let _ = io::stderr().flush();
 
         let line = match lines.next_line().await {
