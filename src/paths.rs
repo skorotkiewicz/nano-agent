@@ -1,6 +1,44 @@
-//! Path helpers: lexical normalization and containment checks.
+//! Path helpers: lexical normalization, containment, and ~/.nano layout.
 
+use dirs::home_dir;
 use std::path::{Component, Path, PathBuf};
+
+/// Everything nano owns under the home tree lives here.
+pub fn nano_home() -> PathBuf {
+    home_dir().unwrap_or_default().join(".nano")
+}
+
+pub fn nano_config_path() -> PathBuf {
+    nano_home().join("config.json")
+}
+
+pub fn nano_mcp_cache_path() -> PathBuf {
+    nano_home().join("mcp_cache.json")
+}
+
+pub fn nano_sessions_dir() -> PathBuf {
+    nano_home().join("sessions")
+}
+
+/// Stable, filesystem-safe key for a cwd (FNV-1a hex). Collision risk is
+/// academic; each session still stores its absolute `cwd` for filtering.
+pub fn cwd_session_key(cwd: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in cwd.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+pub fn session_file_for_cwd(cwd: &str) -> PathBuf {
+    nano_sessions_dir().join(format!("{}.jsonl", cwd_session_key(cwd)))
+}
+
+/// Create `~/.nano` (+ `sessions/`) on demand. Best-effort; callers ignore errors.
+pub fn ensure_nano_dirs() {
+    let _ = std::fs::create_dir_all(nano_sessions_dir());
+}
 
 /// Lexically normalize a path: resolve `.` and `..` components without
 /// touching the filesystem.
@@ -46,5 +84,11 @@ mod tests {
         assert!(path_is_inside(Path::new("/a/b"), Path::new("/a/b/c")));
         assert!(!path_is_inside(Path::new("/a/b"), Path::new("/a/bc")));
         assert!(!path_is_inside(Path::new("/a/b"), Path::new("/a/b/../d")));
+    }
+
+    #[test]
+    fn cwd_session_key_is_stable() {
+        assert_eq!(cwd_session_key("/tmp/a"), cwd_session_key("/tmp/a"));
+        assert_ne!(cwd_session_key("/tmp/a"), cwd_session_key("/tmp/b"));
     }
 }

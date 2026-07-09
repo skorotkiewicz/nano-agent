@@ -224,10 +224,19 @@ impl Clone for McpClient {
 
 impl McpClient {
     pub fn new() -> Self {
-        let cache_path = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("nano")
-            .join("mcp_cache.json");
+        use crate::paths::{ensure_nano_dirs, nano_mcp_cache_path};
+        ensure_nano_dirs();
+        let cache_path = nano_mcp_cache_path();
+        // Migrate from XDG cache if present and target empty.
+        if !cache_path.exists() {
+            let legacy = dirs::cache_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("nano")
+                .join("mcp_cache.json");
+            if legacy.exists() {
+                let _ = std::fs::copy(&legacy, &cache_path);
+            }
+        }
 
         McpClient {
             servers: Arc::new(Mutex::new(HashMap::new())),

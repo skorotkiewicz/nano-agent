@@ -164,13 +164,24 @@ fn merge_config_value(base: &mut Value, overlay: Value) {
 }
 
 fn config_path_global() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_default()
-        .join("nano")
-        .join("config.json")
+    use crate::paths::{ensure_nano_dirs, nano_config_path};
+    ensure_nano_dirs();
+    let path = nano_config_path();
+    // One-shot migrate from XDG ~/.config/nano/config.json if ~/.nano/config.json is missing.
+    if !path.exists() {
+        let legacy = dirs::config_dir()
+            .unwrap_or_default()
+            .join("nano")
+            .join("config.json");
+        if legacy.exists() {
+            let _ = std::fs::copy(&legacy, &path);
+        }
+    }
+    path
 }
 
 fn config_path_local() -> PathBuf {
+    // Project-local still wins as overlay (not under ~/.nano — lives next to the work).
     std::env::current_dir()
         .unwrap_or_default()
         .join("nano_config.json")

@@ -64,7 +64,16 @@ export OPENAI_MODEL=gemma4
 # localhost needs no API key
 ```
 
-Or `~/.config/nano/config.json` / `./nano_config.json` (local overlays global). See [example_config.json](example_config.json).
+All nano state lives under **`~/.nano/`**:
+
+```
+~/.nano/
+  config.json              # global config
+  mcp_cache.json           # MCP tool cache
+  sessions/<hash>.jsonl    # sessions for one directory
+```
+
+Project overlay: `./nano_config.json`. See [example_config.json](example_config.json).
 
 ## Env
 

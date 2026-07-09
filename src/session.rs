@@ -1,20 +1,21 @@
-//! Session persistence (~/.nano_sessions.json) and per-conversation state.
+//! Session persistence (~/.nano/sessions/<cwd-hash>.jsonl) and conversation state.
 
 use crate::provider::ApiFormat;
 use crate::state::color;
 use dirs::home_dir;
+use nano_agent::paths::{ensure_nano_dirs, session_file_for_cwd};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Once;
 
-static SESSIONS_PATH: OnceLock<PathBuf> = OnceLock::new();
 const MAX_SESSIONS: usize = 50;
 // ponytail: hard caps so resume stays usable; raise if long-context session files matter
 const MAX_SESSION_MESSAGES: usize = 200;
 const MAX_MESSAGE_CHARS: usize = 4_000;
+static MIGRATE_ONCE: Once = Once::new();
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Session {
@@ -119,10 +120,6 @@ impl Session {
     }
 }
 
-fn sessions_path() -> &'static PathBuf {
-    SESSIONS_PATH.get_or_init(|| home_dir().unwrap_or_default().join(".nano_sessions.json"))
-}
-
 fn current_cwd_string() -> String {
     env::current_dir()
         .unwrap_or_default()
@@ -131,23 +128,97 @@ fn current_cwd_string() -> String {
         .to_string()
 }
 
-fn load_sessions() -> Vec<Session> {
-    let path = sessions_path();
-    if path.exists() {
-        let data = std::fs::read_to_string(path).unwrap_or_default();
-        serde_json::from_str(&data).unwrap_or_default()
-    } else {
-        vec![]
+fn sessions_file() -> PathBuf {
+    ensure_nano_dirs();
+    migrate_legacy_sessions_once();
+    session_file_for_cwd(&current_cwd_string())
+}
+
+/// One-shot: split ~/.nano_sessions.json into per-cwd JSONL under ~/.nano/sessions/.
+fn migrate_legacy_sessions_once() {
+    MIGRATE_ONCE.call_once(|| {
+        let legacy = home_dir().unwrap_or_default().join(".nano_sessions.json");
+        if !legacy.exists() {
+            return;
+        }
+        let data = match std::fs::read_to_string(&legacy) {
+            Ok(data) => data,
+            Err(_) => return,
+        };
+        let sessions: Vec<Session> = match serde_json::from_str(&data) {
+            Ok(sessions) => sessions,
+            Err(_) => return,
+        };
+
+        let mut by_cwd: std::collections::HashMap<String, Vec<Session>> =
+            std::collections::HashMap::new();
+        for session in sessions {
+            by_cwd.entry(session.cwd.clone()).or_default().push(session);
+        }
+
+        for (cwd, mut list) in by_cwd {
+            list.sort_by_key(|s| s.ts);
+            let path = session_file_for_cwd(&cwd);
+            // Don't clobber newer JSONL if user already wrote under ~/.nano.
+            if path.exists() {
+                continue;
+            }
+            let _ = write_sessions_jsonl(&path, &list);
+        }
+
+        // Leave a trail; don't delete legacy automatically (user may want a backup).
+        let bak = legacy.with_extension("json.bak");
+        let _ = std::fs::rename(&legacy, &bak);
+    });
+}
+
+fn load_sessions_from(path: &Path) -> Vec<Session> {
+    if !path.exists() {
+        return vec![];
     }
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(_) => return vec![],
+    };
+
+    // JSONL first; fall back to a single JSON array (pre-split leftover).
+    let mut sessions = Vec::new();
+    let mut all_jsonl = !data.trim().is_empty();
+    for line in data.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Session>(line) {
+            Ok(session) => sessions.push(session),
+            Err(_) => {
+                all_jsonl = false;
+                break;
+            }
+        }
+    }
+    if all_jsonl && !sessions.is_empty() {
+        return sessions;
+    }
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+fn write_sessions_jsonl(path: &Path, sessions: &[Session]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body = String::new();
+    for session in sessions {
+        let line = serde_json::to_string(session).map_err(io::Error::other)?;
+        body.push_str(&line);
+        body.push('\n');
+    }
+    atomic_write(path, body.as_bytes())
 }
 
 /// Sessions recorded in the current working directory, oldest first.
 pub fn sessions_in_cwd() -> Vec<Session> {
-    let cwd = current_cwd_string();
-    load_sessions()
-        .into_iter()
-        .filter(|s| s.cwd == cwd)
-        .collect()
+    load_sessions_from(&sessions_file())
 }
 
 pub fn append_session_messages(
@@ -166,10 +237,11 @@ pub fn save_session(
     format: ApiFormat,
     messages: Option<Vec<Value>>,
 ) {
-    let mut sessions = load_sessions();
+    let path = sessions_file();
+    let mut sessions = load_sessions_from(&path);
     let cwd = current_cwd_string();
 
-    sessions.retain(|s| !(s.label == label && s.cwd == cwd));
+    sessions.retain(|s| s.label != label);
 
     sessions.push(Session {
         id: response_id.to_string(),
@@ -193,9 +265,7 @@ pub fn save_session(
         }
     }
 
-    if let Ok(data) = serde_json::to_string_pretty(&sessions) {
-        let _ = atomic_write(sessions_path(), data.as_bytes());
-    }
+    let _ = write_sessions_jsonl(&path, &sessions);
 }
 
 fn compact_messages(messages: &mut Vec<Value>) {
@@ -236,17 +306,22 @@ fn truncate_keep_tail(text: &str, max: usize) -> String {
     format!("[…truncated]\n{}", &text[start..])
 }
 
-/// Write via temp+rename so a crash mid-write can't leave a half JSON array.
+/// Write via temp+rename so a crash mid-write can't leave a half JSONL file.
 fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let _ = std::fs::create_dir_all(parent);
     let tmp = parent.join(format!(
         ".{}.tmp.{}",
         path.file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("nano_sessions"),
+            .unwrap_or("sessions"),
         std::process::id()
     ));
-    std::fs::write(&tmp, data)?;
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
@@ -373,5 +448,34 @@ mod tests {
         let pending = resp.take_pending_context().unwrap();
         assert!(pending.contains("pwd"));
         assert!(resp.take_pending_context().is_none());
+    }
+
+    #[test]
+    fn jsonl_roundtrip() {
+        use super::{Session, load_sessions_from, write_sessions_jsonl};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let dir = std::env::temp_dir().join(format!(
+            "nano-session-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("t.jsonl");
+        let sessions = vec![Session {
+            id: "a".into(),
+            label: "hello".into(),
+            cwd: "/tmp".into(),
+            ts: 1,
+            format: Some(ApiFormat::ChatCompletions),
+            messages: Some(vec![serde_json::json!({"role": "user", "content": "hi"})]),
+        }];
+        write_sessions_jsonl(&path, &sessions).unwrap();
+        let loaded = load_sessions_from(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].label, "hello");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
