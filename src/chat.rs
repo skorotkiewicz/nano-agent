@@ -3,7 +3,7 @@
 
 use crate::policy::{expose_execute_shell_tools, expose_mcp_tools};
 use crate::prompt::get_system;
-use crate::provider::{ApiTarget, get_api_target};
+use crate::provider::{ApiTarget, apply_generation_controls, get_api_target};
 use crate::state::{color, get_config, get_max_steps, get_mcp_client, is_tty};
 use crate::tools::{ToolCancelled, dispatch_tool_call, get_tool_chat, get_tool_responses};
 #[cfg(feature = "acp")]
@@ -19,12 +19,22 @@ use tokio::time::Duration;
 pub type TurnOutcome =
     Result<(String, Option<String>, Option<Vec<serde_json::Value>>), TurnCancelled>;
 
-#[derive(Debug, Clone, Copy)]
-pub struct TurnCancelled;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnCancelled {
+    User,
+}
+
+impl TurnCancelled {
+    pub fn should_report(self) -> bool {
+        !matches!(self, Self::User)
+    }
+}
 
 impl From<ToolCancelled> for TurnCancelled {
-    fn from(_: ToolCancelled) -> Self {
-        Self
+    fn from(value: ToolCancelled) -> Self {
+        match value {
+            ToolCancelled::User => Self::User,
+        }
     }
 }
 
@@ -113,12 +123,12 @@ async fn respond_responses(
     if let Some(prev) = previous {
         body["previous_response_id"] = serde_json::Value::String(prev.to_string());
     }
-    if let Some(n) = get_config().get_max_tokens() {
-        body["max_tokens"] = n.into();
-    }
-    if let Some(t) = get_config().get_temperature() {
-        body["temperature"] = t.into();
-    }
+    apply_generation_controls(
+        &mut body,
+        target.format,
+        get_config().get_max_tokens(),
+        get_config().get_temperature(),
+    );
     respond_api(client, &target, body).await
 }
 
@@ -269,12 +279,12 @@ async fn respond_chat_with_target(
         "messages": messages,
         "tools": tools
     });
-    if let Some(n) = get_config().get_max_tokens() {
-        body["max_tokens"] = n.into();
-    }
-    if let Some(t) = get_config().get_temperature() {
-        body["temperature"] = t.into();
-    }
+    apply_generation_controls(
+        &mut body,
+        target.format,
+        get_config().get_max_tokens(),
+        get_config().get_temperature(),
+    );
     respond_api(client, target, body).await
 }
 
@@ -379,4 +389,16 @@ pub async fn run_chat_with_system(
         Some("chat-session".to_string()),
         Some(messages),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TurnCancelled;
+    use crate::tools::ToolCancelled;
+
+    #[test]
+    fn user_tool_cancel_is_silent() {
+        let cancelled: TurnCancelled = ToolCancelled::User.into();
+        assert!(!cancelled.should_report());
+    }
 }

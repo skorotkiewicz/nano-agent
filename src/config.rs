@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -87,48 +88,21 @@ impl Config {
         let global = Self::load_from_path(&config_path_global());
         let local = Self::load_from_path(&config_path_local());
         match (global, local) {
-            (Some(g), Some(l)) => g.merge(l),
-            (Some(g), None) => g,
-            (None, Some(l)) => l,
+            (Some(mut g), Some(l)) => {
+                merge_config_value(&mut g, l);
+                serde_json::from_value(g).unwrap_or_default()
+            }
+            (Some(g), None) | (None, Some(g)) => serde_json::from_value(g).unwrap_or_default(),
             (None, None) => Self::default(),
         }
     }
 
-    /// Overlay `other` (typically the local project config) on top of `self`
-    /// (typically the global config): explicit fields and map entries from
-    /// `other` win.
-    fn merge(mut self, other: Config) -> Config {
-        if other.model.is_some() {
-            self.model = other.model;
-        }
-        if other.provider.is_some() {
-            self.provider = other.provider;
-        }
-        if other.max_tokens.is_some() {
-            self.max_tokens = other.max_tokens;
-        }
-        if other.temperature.is_some() {
-            self.temperature = other.temperature;
-        }
-        if other.mito_mode.enabled {
-            self.mito_mode = other.mito_mode;
-        }
-        for (name, server) in other.custom_providers {
-            self.custom_providers.insert(name, server);
-        }
-        for (name, server) in other.mcp_servers {
-            self.mcp_servers.insert(name, server);
-        }
-        for (name, agent) in other.acp_agents {
-            self.acp_agents.insert(name, agent);
-        }
-        self
-    }
-
-    fn load_from_path(path: &PathBuf) -> Option<Self> {
+    fn load_from_path(path: &PathBuf) -> Option<Value> {
         if path.exists() {
             let data = std::fs::read_to_string(path).ok()?;
-            serde_json::from_str(&data).ok()
+            let mut value: Value = serde_json::from_str(&data).ok()?;
+            normalize_config_value(&mut value);
+            Some(value)
         } else {
             None
         }
@@ -156,6 +130,32 @@ impl Config {
 
     pub fn get_mito_mode(&self) -> &MitoModeConfig {
         &self.mito_mode
+    }
+}
+
+fn normalize_config_value(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if !object.contains_key("mito-mode")
+        && let Some(alias) = object.remove("mito_mode")
+    {
+        object.insert("mito-mode".to_string(), alias);
+    }
+}
+
+fn merge_config_value(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base_map), Value::Object(overlay_map)) => {
+            for (key, value) in overlay_map {
+                if let Some(existing) = base_map.get_mut(&key) {
+                    merge_config_value(existing, value);
+                } else {
+                    base_map.insert(key, value);
+                }
+            }
+        }
+        (base_slot, overlay_value) => *base_slot = overlay_value,
     }
 }
 
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn merge_overlays_local_fields_and_maps() {
-        let global: Config = serde_json::from_str(
+        let mut global: Value = serde_json::from_str(
             r#"{
                 "model": "global-model",
                 "provider": "global",
@@ -355,18 +355,45 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let local: Config = serde_json::from_str(
+        let local: Value = serde_json::from_str(
             r#"{
                 "model": "local-model",
                 "mcp_servers": {"semble": {"command": "uvx"}}
             }"#,
         )
         .unwrap();
-        let merged = global.merge(local);
+        merge_config_value(&mut global, local);
+        let merged: Config = serde_json::from_value(global).unwrap();
         assert_eq!(merged.model.as_deref(), Some("local-model"));
         assert_eq!(merged.provider.as_deref(), Some("global"));
         assert_eq!(merged.max_tokens, Some(100));
         assert!(merged.custom_providers.contains_key("a"));
         assert!(merged.mcp_servers.contains_key("semble"));
+    }
+
+    #[test]
+    fn merge_allows_local_mito_mode_to_disable_global() {
+        let mut global: Value = serde_json::from_str(
+            r#"{
+                "mito-mode": {
+                    "enabled": true,
+                    "provider": "global"
+                }
+            }"#,
+        )
+        .unwrap();
+        let mut local: Value = serde_json::from_str(
+            r#"{
+                "mito_mode": {
+                    "enabled": false
+                }
+            }"#,
+        )
+        .unwrap();
+        normalize_config_value(&mut local);
+        merge_config_value(&mut global, local);
+        let merged: Config = serde_json::from_value(global).unwrap();
+        assert!(!merged.mito_mode.enabled);
+        assert_eq!(merged.mito_mode.provider.as_deref(), Some("global"));
     }
 }

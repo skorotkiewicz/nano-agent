@@ -4,7 +4,8 @@
 use crate::chat::{run_chat, run_responses};
 #[cfg(feature = "acp")]
 use crate::provider::{ApiFormat, get_api_target};
-use crate::session::{SessionState, save_session};
+use crate::session::{SessionState, append_session_messages, save_session};
+use crate::state::color;
 use reqwest::Client;
 
 pub async fn run_state_turn(
@@ -15,21 +16,28 @@ pub async fn run_state_turn(
     label_prompt: &str,
 ) -> String {
     let result = match state {
-        SessionState::Responses { previous } => {
+        SessionState::Responses { previous, .. } => {
             run_responses(client, prompt, previous.as_deref()).await
         }
         SessionState::Chat { messages } => run_chat(client, prompt, messages.clone()).await,
     };
 
-    let Ok((answer, prev_id, new_messages)) = result else {
-        return String::new();
+    let (answer, prev_id, new_messages) = match result {
+        Ok(values) => values,
+        Err(cancelled) => {
+            if cancelled.should_report() {
+                eprintln!("{}", color("90", "cancelled"));
+            }
+            return String::new();
+        }
     };
     let session_label = label.as_deref().unwrap_or(label_prompt);
 
     match state {
-        SessionState::Responses { previous } => {
+        SessionState::Responses { previous, messages } => {
             if let Some(ref id) = prev_id {
-                save_session(id, session_label, new_messages);
+                let merged_messages = append_session_messages(messages, new_messages);
+                save_session(id, session_label, merged_messages);
             }
             *previous = prev_id;
         }
@@ -57,6 +65,11 @@ pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
     };
     match result {
         Ok((answer, _, _)) => answer,
-        Err(_) => String::new(),
+        Err(cancelled) => {
+            if cancelled.should_report() {
+                eprintln!("{}", color("90", "cancelled"));
+            }
+            String::new()
+        }
     }
 }

@@ -4,6 +4,7 @@ use crate::provider::ApiFormat;
 use crate::state::color;
 use dirs::home_dir;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::env;
 use std::io;
 use std::path::PathBuf;
@@ -18,18 +19,26 @@ pub struct Session {
     pub cwd: String,
     pub ts: i64,
     #[serde(default)]
-    pub messages: Option<Vec<serde_json::Value>>,
+    pub messages: Option<Vec<Value>>,
 }
 
 pub enum SessionState {
-    Responses { previous: Option<String> },
-    Chat { messages: Vec<serde_json::Value> },
+    Responses {
+        previous: Option<String>,
+        messages: Vec<Value>,
+    },
+    Chat {
+        messages: Vec<Value>,
+    },
 }
 
 impl SessionState {
     pub fn new(format: ApiFormat) -> Self {
         match format {
-            ApiFormat::Responses => SessionState::Responses { previous: None },
+            ApiFormat::Responses => SessionState::Responses {
+                previous: None,
+                messages: vec![],
+            },
             ApiFormat::ChatCompletions => SessionState::Chat { messages: vec![] },
         }
     }
@@ -38,6 +47,7 @@ impl SessionState {
         match format {
             ApiFormat::Responses => SessionState::Responses {
                 previous: Some(session.id),
+                messages: session.messages.unwrap_or_default(),
             },
             ApiFormat::ChatCompletions => SessionState::Chat {
                 messages: session.messages.unwrap_or_default(),
@@ -77,7 +87,17 @@ pub fn sessions_in_cwd() -> Vec<Session> {
         .collect()
 }
 
-pub fn save_session(response_id: &str, label: &str, messages: Option<Vec<serde_json::Value>>) {
+pub fn append_session_messages(
+    existing: &mut Vec<Value>,
+    new_messages: Option<Vec<Value>>,
+) -> Option<Vec<Value>> {
+    if let Some(new_messages) = new_messages {
+        existing.extend(new_messages);
+    }
+    (!existing.is_empty()).then(|| existing.clone())
+}
+
+pub fn save_session(response_id: &str, label: &str, messages: Option<Vec<Value>>) {
     let mut sessions = load_sessions();
     let cwd = current_cwd_string();
 
@@ -144,5 +164,27 @@ pub fn pick_session() -> Option<Session> {
             eprintln!("invalid session");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_session_messages;
+
+    #[test]
+    fn append_session_messages_keeps_prior_turns() {
+        let mut existing = vec![serde_json::json!({"role": "user", "content": "first"})];
+        let merged = append_session_messages(
+            &mut existing,
+            Some(vec![
+                serde_json::json!({"role": "assistant", "content": "second"}),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(existing.len(), 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0]["content"], "first");
+        assert_eq!(merged[1]["content"], "second");
     }
 }

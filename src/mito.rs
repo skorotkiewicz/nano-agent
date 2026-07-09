@@ -5,7 +5,7 @@ use crate::chat::run_chat_with_system;
 use crate::prompt::{doc_names, find_files};
 use crate::provider::get_mito_target;
 use crate::session::SessionState;
-use crate::state::context_cwd;
+use crate::state::{color, context_cwd};
 use crate::turn::run_state_turn;
 use reqwest::Client;
 
@@ -64,7 +64,12 @@ pub async fn run_mito_turn(
     let (answer, _, new_messages) =
         match run_chat_with_system(client, prompt, mito_messages.clone(), &system, &target).await {
             Ok(result) => result,
-            Err(_) => return String::new(),
+            Err(cancelled) => {
+                if cancelled.should_report() {
+                    eprintln!("{}", color("90", "cancelled"));
+                }
+                return String::new();
+            }
         };
 
     if let Some(messages) = new_messages {

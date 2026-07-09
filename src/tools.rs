@@ -19,8 +19,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, timeout};
 
-#[derive(Debug, Clone, Copy)]
-pub struct ToolCancelled;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCancelled {
+    User,
+}
 
 pub fn get_tool_responses() -> &'static serde_json::Value {
     static TOOL: OnceLock<serde_json::Value> = OnceLock::new();
@@ -348,7 +350,7 @@ async fn execute_shell_tool(args: &serde_json::Value) -> Result<String, ToolCanc
             Ok(execute_shell(args, prepared).await)
         }
         Approval::Deny => Ok(color("31", "denied by user")),
-        Approval::Cancel => Err(ToolCancelled),
+        Approval::Cancel => Err(ToolCancelled::User),
     }
 }
 

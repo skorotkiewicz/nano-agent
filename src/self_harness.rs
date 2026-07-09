@@ -1,7 +1,7 @@
 //! Self-Harness: propose one prompt-overlay edit, keep it only after validation.
 
 use crate::prompt;
-use crate::provider::{ApiFormat, get_api_target};
+use crate::provider::{ApiFormat, apply_generation_controls, get_api_target};
 use crate::session::sessions_in_cwd;
 use crate::state::get_config;
 use reqwest::Client;
@@ -131,12 +131,12 @@ async fn ask_model(client: &Client, system: &str, prompt_text: &str) -> Result<S
             ]
         }),
     };
-    if let Some(n) = get_config().get_max_tokens() {
-        body["max_tokens"] = n.into();
-    }
-    if let Some(t) = get_config().get_temperature() {
-        body["temperature"] = t.into();
-    }
+    apply_generation_controls(
+        &mut body,
+        target.format,
+        get_config().get_max_tokens(),
+        get_config().get_temperature(),
+    );
 
     let mut req = client
         .post(&target.url)
