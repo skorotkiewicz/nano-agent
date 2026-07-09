@@ -14,7 +14,7 @@ use input::read_repl_input;
 use mito::{run_mito_turn, strip_mito_prefix};
 #[cfg(feature = "acp")]
 use nano_agent::acp::{AcpPrompt, AcpServer};
-use provider::{check_api_key, get_api_target};
+use provider::{check_api_key, get_api_target, print_effective_config};
 use reqwest::Client;
 use self_harness::{run_self_harness, strip_self_harness_prefix};
 use serde_json::Value;
@@ -25,6 +25,32 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use turn::run_state_turn;
+
+fn print_usage() {
+    eprintln!(
+        "nano-agent — tiny shell agent for OpenAI-compatible APIs\n\n\
+         Usage:\n\
+           nano-agent [flags] [prompt...]\n\n\
+         Flags:\n\
+           -c                 continue last session in this directory\n\
+           -s                 pick a recent session in this directory\n\
+           --show-config      print effective provider/model/sandbox and exit\n\
+           --help, -h         show this help\n\
+           --acp              run as ACP stdio agent (needs --features acp)\n\n\
+         REPL:\n\
+           :q / quit / exit   quit\n\
+           :reset             clear history and mito context\n\
+           /mito ...          local planner handoff\n\
+           /self-harness <cmd> propose/keep harness after validator passes\n\
+           line ending with \\ continues multiline input\n\n\
+         Env:\n\
+           OPENAI_API_KEY     required unless provider sets a key\n\
+           OPENAI_BASE_URL    OpenAI-compatible base (implies chat-completions)\n\
+           OPENAI_MODEL       model id (default gpt-5.5)\n\
+           NANO_MAX_STEPS     tool-loop cap (default 200)\n\
+           NANO_SANDBOX       off | fs (default) | fs+net\n"
+    );
+}
 
 fn http_client() -> Client {
     // ponytail: finite timeouts beat hanging forever on a dead endpoint
@@ -102,6 +128,20 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
         ),
         color("90", &get_mcp_client().status())
     );
+    eprintln!(
+        "{}",
+        color(
+            "90",
+            &format!(
+                "sandbox: {}  model: {}",
+                nano_agent::sandbox::SandboxMode::from_env_value(
+                    std::env::var("NANO_SANDBOX").ok().as_deref()
+                )
+                .label(),
+                get_api_target().model
+            )
+        )
+    );
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut mito_messages = Vec::new();
@@ -138,7 +178,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
 fn resume_last_session() -> Session {
     let sessions = sessions_in_cwd();
     let Some(last) = sessions.into_iter().next_back() else {
-        eprintln!("no sessions in this directory");
+        eprintln!("no sessions in this directory — starting a fresh one");
         std::process::exit(1);
     };
     last
@@ -160,7 +200,8 @@ fn ensure_session_format(current: provider::ApiFormat, session: &Session) {
     };
 
     eprintln!(
-        "cannot resume session '{}' created with {}; current configuration uses {}",
+        "cannot resume session '{}' created with {}; current configuration uses {}\n\
+         start fresh: nano-agent (without -c/-s), or match the original API format",
         session.label, saved_name, current_name
     );
     std::process::exit(1);
@@ -169,6 +210,15 @@ fn ensure_session_format(current: provider::ApiFormat, session: &Session) {
 #[tokio::main]
 async fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
+
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print_usage();
+        return;
+    }
+    if args.iter().any(|arg| arg == "--show-config") {
+        print_effective_config();
+        return;
+    }
 
     if args.iter().any(|arg| arg == "--acp") {
         #[cfg(feature = "acp")]

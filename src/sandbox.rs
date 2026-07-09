@@ -4,9 +4,60 @@ use std::path::PathBuf;
 
 use tokio::process::Command;
 
+/// How aggressively to isolate a shell command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxMode {
+    /// No bubblewrap — host shell.
+    Off,
+    /// Filesystem isolation; no network (`--unshare-all`).
+    Fs,
+    /// Filesystem isolation plus host network (`--share-net`).
+    FsNet,
+}
+
+impl SandboxMode {
+    /// Parse `NANO_SANDBOX` (and friends). Empty/unset defaults to `Fs`.
+    ///
+    /// Accepts: `0|false|no|off`, `1|true|yes|on|fs`, `net|fs+net|share-net`.
+    pub fn from_env_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).filter(|v| !v.is_empty()) {
+            None => Self::Fs,
+            Some(v) if is_false_flag(v) => Self::Off,
+            Some(v) if is_net_mode(v) => Self::FsNet,
+            Some(_) => Self::Fs,
+        }
+    }
+
+    pub fn enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Fs => "fs",
+            Self::FsNet => "fs+net",
+        }
+    }
+}
+
+fn is_false_flag(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
+}
+
+fn is_net_mode(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "net" | "fs+net" | "fs_net" | "share-net" | "sharenet" | "network"
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct Sandbox {
-    enabled: bool,
+    mode: SandboxMode,
     cwd: PathBuf,
     shell: String,
     restrict_to_cwd: bool,
@@ -14,9 +65,17 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new(enabled: bool) -> Self {
+        Self::with_mode(if enabled {
+            SandboxMode::Fs
+        } else {
+            SandboxMode::Off
+        })
+    }
+
+    pub fn with_mode(mode: SandboxMode) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
         Sandbox {
-            enabled,
+            mode,
             cwd,
             shell: "bash".to_string(),
             restrict_to_cwd: false,
@@ -40,8 +99,12 @@ impl Sandbox {
         self
     }
 
+    pub fn mode(&self) -> SandboxMode {
+        self.mode
+    }
+
     pub fn wrap_command(&self, command: &str) -> Command {
-        if !self.enabled {
+        if !self.mode.enabled() {
             let mut cmd = Command::new(&self.shell);
             cmd.arg("-c").arg(command);
             return cmd;
@@ -60,13 +123,11 @@ impl Sandbox {
             .arg(self.cwd.as_os_str())
             .arg(self.cwd.as_os_str());
         cmd.args(["--proc", "/proc", "--dev", "/dev"]);
-        cmd.args([
-            "--unshare-all",
-            "--die-with-parent",
-            &self.shell,
-            "-c",
-            command,
-        ]);
+        cmd.arg("--unshare-all");
+        if matches!(self.mode, SandboxMode::FsNet) {
+            cmd.arg("--share-net");
+        }
+        cmd.args(["--die-with-parent", &self.shell, "-c", command]);
         cmd
     }
 }
@@ -117,7 +178,7 @@ mod tests {
     #[test]
     fn test_sandbox_new_creates_with_defaults() {
         let sb = Sandbox::new(false);
-        assert!(!sb.enabled);
+        assert_eq!(sb.mode(), SandboxMode::Off);
         assert_eq!(sb.shell, "bash");
     }
 
@@ -144,5 +205,29 @@ mod tests {
     fn test_sandbox_restrict_to_cwd() {
         let sb = Sandbox::new(true).restrict_to_cwd(true);
         assert!(sb.restrict_to_cwd);
+    }
+
+    #[test]
+    fn sandbox_mode_from_env_value() {
+        assert_eq!(SandboxMode::from_env_value(None), SandboxMode::Fs);
+        assert_eq!(SandboxMode::from_env_value(Some("")), SandboxMode::Fs);
+        assert_eq!(SandboxMode::from_env_value(Some("0")), SandboxMode::Off);
+        assert_eq!(SandboxMode::from_env_value(Some("off")), SandboxMode::Off);
+        assert_eq!(SandboxMode::from_env_value(Some("fs")), SandboxMode::Fs);
+        assert_eq!(SandboxMode::from_env_value(Some("1")), SandboxMode::Fs);
+        assert_eq!(SandboxMode::from_env_value(Some("net")), SandboxMode::FsNet);
+        assert_eq!(
+            SandboxMode::from_env_value(Some("fs+net")),
+            SandboxMode::FsNet
+        );
+    }
+
+    #[test]
+    fn fs_net_adds_share_net() {
+        let sb = Sandbox::with_mode(SandboxMode::FsNet).with_cwd(PathBuf::from("/tmp"));
+        let cmd = sb.wrap_command("true");
+        let debug = format!("{:?}", cmd.as_std());
+        assert!(debug.contains("share-net") || debug.contains("\"--share-net\""));
+        assert!(debug.contains("unshare-all") || debug.contains("\"--unshare-all\""));
     }
 }

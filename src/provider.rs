@@ -64,6 +64,50 @@ pub fn check_api_key() {
     }
 }
 
+/// Print the resolved provider/target for diagnosis (no secrets beyond key presence).
+pub fn print_effective_config() {
+    let target = get_api_target();
+    let config = get_config();
+    let format = match target.format {
+        ApiFormat::Responses => "responses",
+        ApiFormat::ChatCompletions => "chat-completions",
+    };
+    let key = if target.api_key.is_empty() {
+        "(none)"
+    } else {
+        "(set)"
+    };
+    let sandbox = nano_agent::sandbox::SandboxMode::from_env_value(
+        env::var("NANO_SANDBOX").ok().as_deref(),
+    )
+    .label();
+    let provider = config.get_provider().unwrap_or("(default)");
+    let base_url_env = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "(unset)".to_string());
+    let model_env = env::var("OPENAI_MODEL").unwrap_or_else(|_| "(unset)".to_string());
+
+    println!("provider:     {provider}");
+    println!("model:        {}", target.model);
+    println!("endpoint:     {}", target.url);
+    println!("format:       {format}");
+    println!("api_key:      {key}");
+    println!("OPENAI_BASE_URL: {base_url_env}");
+    println!("OPENAI_MODEL:    {model_env}");
+    if let Some(max) = config.get_max_tokens() {
+        println!("max_tokens:   {max}");
+    }
+    if let Some(temp) = config.get_temperature() {
+        println!("temperature:  {temp}");
+    }
+    println!("NANO_SANDBOX: {sandbox}");
+    println!("mcp_servers:  {}", config.mcp_servers.len());
+    println!("acp_agents:   {}", config.acp_agents.len());
+    let mito = config.get_mito_mode();
+    println!(
+        "mito-mode:    enabled={} provider={:?} model={:?}",
+        mito.enabled, mito.provider, mito.model
+    );
+}
+
 fn resolve_api_key(configured: Option<String>, fallback: String) -> String {
     configured.unwrap_or(fallback)
 }

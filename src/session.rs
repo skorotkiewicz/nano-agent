@@ -176,7 +176,7 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 pub fn pick_session() -> Option<Session> {
     let sessions = sessions_in_cwd();
     if sessions.is_empty() {
-        eprintln!("no sessions in this directory");
+        eprintln!("no sessions in this directory — start fresh with `nano-agent` (no -s)");
         std::process::exit(1);
     }
 

@@ -66,8 +66,13 @@ fn get_mito_system() -> String {
          Your job is to discuss the request with the user, inspect the current directory when useful, and prepare a detailed handoff for the primary LLM.\n\
          Ask concise clarifying questions when the task is underspecified.\n\
          Use execute_shell and MCP tools only when they help you understand the repo or produce a better handoff. For execute_shell, description must be 5-10 words. Never run destructive commands unless explicitly requested.\n\
-         When you are ready for the primary LLM to do the work, output exactly one handoff and no other text, starting with MITO_SEND: followed by the complete prompt.\n\
-         The handoff prompt must include the objective, relevant context, constraints, expected files or deliverables, and any preferences learned from the user.\n\
+         When you are ready for the primary LLM to do the work, output exactly one handoff and no other text.\n\
+         Start the handoff with MITO_SEND: then use this short schema (skip empty sections):\n\
+         Objective: one sentence done-when\n\
+         Context: paths, facts, prior decisions the primary LLM needs\n\
+         Constraints: hard limits (no, barely, formats, platforms)\n\
+         Steps: ordered work the primary LLM should do\n\
+         Done when: concrete acceptance checks\n\
          cwd: {}\n\
          Important docs (read as needed): {}",
         cwd, docs

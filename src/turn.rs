@@ -17,6 +17,7 @@ pub async fn run_state_turn(
     label_prompt: &str,
 ) -> String {
     crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::state::APPROVE_SAFE.store(false, std::sync::atomic::Ordering::SeqCst);
 
     let result = match state {
         SessionState::Responses { previous, .. } => {
@@ -68,6 +69,7 @@ pub async fn run_state_turn(
 #[cfg(feature = "acp")]
 pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
     crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::state::APPROVE_SAFE.store(false, std::sync::atomic::Ordering::SeqCst);
     let result = match get_api_target().format {
         ApiFormat::Responses => run_responses(client, prompt, None).await,
         ApiFormat::ChatCompletions => run_chat(client, prompt, vec![]).await,

@@ -30,14 +30,18 @@ nano-agent "fix the failing test"   # one-shot prompt
 nano-agent                          # REPL
 nano-agent -c                       # continue last session here
 nano-agent -s                       # pick a recent session
+nano-agent --show-config            # resolved provider/model/sandbox
+nano-agent --help
 ```
 
 Every command the agent wants to run is shown first:
 
 ```
 $ cargo test
-Approve? [y] Approve  [a] Approve All  [n] Deny:
+Approve? [y] Approve  [a] Approve All  [s] Safe  [n] Deny  [Esc] Cancel:
 ```
+
+`[s] Safe` auto-approves later read-only-looking commands this turn (`ls`, `git status`, `cargo test`, `rg`, …). Risky / compound commands still ask.
 
 In the REPL: `:q` quits, `:reset` starts over, end a line with `\` for multiline.
 
@@ -82,7 +86,17 @@ See [example_config.json](example_config.json) for the full format.
 - **Planning mode** — prefix a message with `/mito` to talk to a separate local planning agent that prepares a detailed handoff before the main model acts (enable `mito-mode` in the config).
 - **ACP** — build with `--features acp` to run nano as an ACP stdio agent (`nano-agent --acp`) or to delegate subtasks to child agents configured under `acp_agents`. A child's `working_directory` is its sandbox boundary; without one, its tools are disabled.
 
-Useful environment variables: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `NANO_MAX_STEPS`, `NANO_SANDBOX=0` (disable bwrap sandboxing).
+Useful environment variables:
+
+| Variable | Meaning |
+|----------|---------|
+| `OPENAI_API_KEY` | API key (or set on a custom provider) |
+| `OPENAI_BASE_URL` | OpenAI-compatible base URL (uses chat-completions) |
+| `OPENAI_MODEL` | Model id |
+| `NANO_MAX_STEPS` | Tool-loop cap (default 200) |
+| `NANO_SANDBOX` | `off` / `0` — no bwrap; `fs` (default) — isolate FS, no net; `fs+net` — isolate FS, share network |
+
+Also see [ROADMAP.md](ROADMAP.md).
 
 ## Development
 

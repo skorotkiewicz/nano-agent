@@ -1,5 +1,5 @@
 {
-  "provider": "openai-compatible",
+  "provider": "local",
   "max_tokens": 4096,
   "temperature": 0.2,
   "custom_providers": {

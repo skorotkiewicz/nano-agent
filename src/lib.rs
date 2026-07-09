@@ -11,4 +11,4 @@ pub mod sandbox;
 pub use acp::{AcpAgentConfig, AcpAgentManager, AcpPrompt, AcpServer, AgentTask, AgentTaskResult};
 pub use config::Config;
 pub use mcp::{McpClient, McpServerHandle, McpTool};
-pub use sandbox::Sandbox;
+pub use sandbox::{Sandbox, SandboxMode};

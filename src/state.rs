@@ -10,6 +10,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
+/// After the user picks [s] Safe, auto-approve read-only command patterns this turn.
+pub static APPROVE_SAFE: AtomicBool = AtomicBool::new(false);
 pub static ACP_MODE: AtomicBool = AtomicBool::new(false);
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
