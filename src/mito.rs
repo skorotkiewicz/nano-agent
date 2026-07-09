@@ -74,6 +74,14 @@ fn get_mito_system() -> String {
     )
 }
 
+fn format_mito_handoff_result(handoff: &str, main_answer: &str) -> String {
+    if main_answer.is_empty() {
+        String::new()
+    } else {
+        format!("mito > {}\n{}", handoff, main_answer)
+    }
+}
+
 pub async fn run_mito_turn(
     client: &Client,
     prompt: &str,
@@ -106,16 +114,12 @@ pub async fn run_mito_turn(
     };
 
     let main_answer = run_state_turn(client, &handoff, main_state, main_label, prompt).await;
-    if main_answer.is_empty() {
-        format!("mito > {}", handoff)
-    } else {
-        format!("mito > {}\n{}", handoff, main_answer)
-    }
+    format_mito_handoff_result(&handoff, &main_answer)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_mito_handoff, strip_mito_prefix};
+    use super::{extract_mito_handoff, format_mito_handoff_result, strip_mito_prefix};
 
     #[test]
     fn strip_mito_prefix_accepts_command_boundary() {
@@ -153,5 +157,14 @@ mod tests {
             None
         );
         assert_eq!(extract_mito_handoff("ask a question first"), None);
+    }
+
+    #[test]
+    fn handoff_result_stays_silent_when_main_turn_is_empty() {
+        assert_eq!(format_mito_handoff_result("implement the feature", ""), "");
+        assert_eq!(
+            format_mito_handoff_result("implement the feature", "done"),
+            "mito > implement the feature\ndone"
+        );
     }
 }
