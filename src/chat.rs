@@ -44,7 +44,10 @@ fn parse_api_body(status: reqwest::StatusCode, raw: &str) -> Result<serde_json::
     let body: serde_json::Value = match serde_json::from_str(raw) {
         Ok(body) => body,
         Err(_) if status.is_success() => {
-            return Err(format!("invalid JSON response: {}", truncate_for_error(raw)));
+            return Err(format!(
+                "invalid JSON response: {}",
+                truncate_for_error(raw)
+            ));
         }
         Err(_) => {
             return Err(format!("{status} {}", truncate_for_error(raw)));
@@ -159,9 +162,12 @@ async fn respond_responses(
     let mut body = serde_json::json!({
         "model": target.model.as_str(),
         "instructions": get_system(),
-        "tools": tools,
         "input": payload
     });
+    // Some local servers reject empty "tools": []; omit when unused.
+    if !tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(tools);
+    }
     if let Some(prev) = previous {
         body["previous_response_id"] = serde_json::Value::String(prev.to_string());
     }
@@ -350,8 +356,10 @@ async fn respond_chat_with_target(
     let mut body = serde_json::json!({
         "model": target.model.as_str(),
         "messages": messages,
-        "tools": tools
     });
+    if !tools.is_empty() {
+        body["tools"] = serde_json::Value::Array(tools);
+    }
     apply_generation_controls(
         &mut body,
         target.format,
@@ -359,6 +367,45 @@ async fn respond_chat_with_target(
         get_config().get_temperature(),
     );
     respond_api(client, target, body).await
+}
+
+/// Keep multi-turn chat requests from shipping entire shell dumps forever.
+/// Keeps system + the newest turns; clamps huge tool/assistant blobs.
+fn prepare_chat_messages(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    const MAX_MSGS: usize = 80;
+    const MAX_CHARS: usize = 6_000;
+
+    let mut out: Vec<serde_json::Value> = messages.to_vec();
+    if out.len() > MAX_MSGS {
+        let system = out
+            .first()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+            .cloned();
+        let drop = out.len() - MAX_MSGS;
+        out.drain(0..drop);
+        if let Some(system) = system
+            && out
+                .first()
+                .and_then(|m| m.get("role"))
+                .and_then(|r| r.as_str())
+                != Some("system")
+        {
+            out.insert(0, system);
+        }
+    }
+    for message in &mut out {
+        if let Some(content) = message.get_mut("content")
+            && let Some(text) = content.as_str()
+            && text.len() > MAX_CHARS
+        {
+            let mut start = text.len() - MAX_CHARS;
+            while start < text.len() && !text.is_char_boundary(start) {
+                start += 1;
+            }
+            *content = serde_json::Value::String(format!("[…truncated]\n{}", &text[start..]));
+        }
+    }
+    out
 }
 
 async fn tool_output_chat(
@@ -394,10 +441,11 @@ pub async fn run_chat_with_system(
     ensure_system_message(&mut messages, system);
     messages.push(serde_json::json!({"role": "user", "content": prompt}));
 
-    let mut response = match respond_chat_with_target(client, &messages, target).await {
-        Ok(r) => r,
-        Err(e) => return Ok((format!("API Error: {}", e), None, Some(messages))),
-    };
+    let mut response =
+        match respond_chat_with_target(client, &prepare_chat_messages(&messages), target).await {
+            Ok(r) => r,
+            Err(e) => return Ok((format!("API Error: {}", e), None, Some(messages))),
+        };
 
     for _ in 0..get_max_steps() {
         let choice = response
@@ -405,6 +453,13 @@ pub async fn run_chat_with_system(
             .and_then(|c| c.get(0))
             .cloned()
             .unwrap_or_default();
+        // Some local models return HTTP 200 with {"error":...} (already rejected),
+        // others return empty choices — treat blank as a real finish, not infinite EMPTY loop.
+        if choice.is_null() || choice.as_object().is_some_and(|o| o.is_empty()) {
+            let err = "API Error: empty choices from model".to_string();
+            messages.push(serde_json::json!({"role": "assistant", "content": err}));
+            return Ok((err, Some("chat-session".to_string()), Some(messages)));
+        }
         let msg = choice.get("message").cloned().unwrap_or_default();
 
         let text_content = msg
@@ -443,7 +498,9 @@ pub async fn run_chat_with_system(
             messages.push(output);
         }
 
-        response = match respond_chat_with_target(client, &messages, target).await {
+        response = match respond_chat_with_target(client, &prepare_chat_messages(&messages), target)
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 return Ok((

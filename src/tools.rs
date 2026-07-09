@@ -210,9 +210,8 @@ pub fn is_safe_command(command: &str) -> bool {
     // Reject compound/redirect/env-heavy commands.
     let lower = line.to_ascii_lowercase();
     const BAD: &[&str] = &[
-        "&&", "||", ";", "|", ">", "<", "`", "$(",
-        "\n", "\r", "rm ", "rm\t", "sudo ", "curl ", "wget ", "chmod ", "chown ",
-        "mkfs", "dd ", ":()", ">/dev/",
+        "&&", "||", ";", "|", ">", "<", "`", "$(", "\n", "\r", "rm ", "rm\t", "sudo ", "curl ",
+        "wget ", "chmod ", "chown ", "mkfs", "dd ", ":()", ">/dev/",
     ];
     if BAD.iter().any(|m| lower.contains(m)) {
         return false;
@@ -224,14 +223,59 @@ pub fn is_safe_command(command: &str) -> bool {
         .unwrap_or(first);
     matches!(
         base,
-        "ls" | "pwd" | "cat" | "head" | "tail" | "wc" | "rg" | "grep" | "find"
-            | "git" | "cargo" | "file" | "stat" | "which" | "type" | "echo"
-            | "date" | "uname" | "whoami" | "env" | "printenv" | "tree" | "bat"
-            | "fd" | "jq" | "sed" | "awk" | "diff" | "hexdump" | "xxd" | "nl"
-            | "realpath" | "readlink" | "basename" | "dirname" | "test" | "["
-            | "true" | "false" | "id" | "hostname" | "df" | "du" | "free"
-            | "ps" | "top" | "uptime" | "locale" | "python" | "python3" | "node"
-            | "rustc" | "rustfmt" | "clippy-driver"
+        "ls" | "pwd"
+            | "cat"
+            | "head"
+            | "tail"
+            | "wc"
+            | "rg"
+            | "grep"
+            | "find"
+            | "git"
+            | "cargo"
+            | "file"
+            | "stat"
+            | "which"
+            | "type"
+            | "echo"
+            | "date"
+            | "uname"
+            | "whoami"
+            | "env"
+            | "printenv"
+            | "tree"
+            | "bat"
+            | "fd"
+            | "jq"
+            | "sed"
+            | "awk"
+            | "diff"
+            | "hexdump"
+            | "xxd"
+            | "nl"
+            | "realpath"
+            | "readlink"
+            | "basename"
+            | "dirname"
+            | "test"
+            | "["
+            | "true"
+            | "false"
+            | "id"
+            | "hostname"
+            | "df"
+            | "du"
+            | "free"
+            | "ps"
+            | "top"
+            | "uptime"
+            | "locale"
+            | "python"
+            | "python3"
+            | "node"
+            | "rustc"
+            | "rustfmt"
+            | "clippy-driver"
     ) && safe_subcommand(base, line)
 }
 
@@ -284,7 +328,10 @@ fn safe_subcommand(base: &str, line: &str) -> bool {
         }),
         // interpreters: version / help only (no free-form scripts)
         "python" | "python3" | "node" | "rustc" => tokens.iter().skip(1).all(|t| {
-            matches!(*t, "-V" | "--version" | "-h" | "--help" | "version" | "help")
+            matches!(
+                *t,
+                "-V" | "--version" | "-h" | "--help" | "version" | "help"
+            )
         }),
         _ => true,
     }
@@ -342,10 +389,7 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
     if acp_mode() {
         return Approval::Approve;
     }
-    let command = args
-        .get("command")
-        .and_then(|c| c.as_str())
-        .unwrap_or("");
+    let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
     if APPROVE_SAFE.load(Ordering::SeqCst) && is_safe_command(command) {
         eprintln!("{}", color("90", "auto-approved (safe)"));
         return Approval::Approve;
@@ -372,7 +416,9 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
     approval_from_line(&choice)
 }
 
-fn merge_shell_env(overrides: Option<&serde_json::Map<String, serde_json::Value>>) -> Vec<(String, String)> {
+fn merge_shell_env(
+    overrides: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Vec<(String, String)> {
     let mut env_map: std::collections::HashMap<String, String> = env::vars().collect();
     if let Some(overrides) = overrides {
         for (k, v) in overrides {
@@ -443,7 +489,15 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
             }
             res
         }
-        Ok(Err(e)) => format!("ExecutionError: {}", e),
+        Ok(Err(e)) => {
+            let mut msg = format!("ExecutionError: {e}");
+            if e.kind() == std::io::ErrorKind::NotFound && sandbox.mode().enabled() {
+                msg.push_str(
+                    "\nhint: bwrap not found (install bubblewrap) or set NANO_SANDBOX=off",
+                );
+            }
+            msg
+        }
         Err(_) => format!("$ {}\ntimeout after {}s\n", command, timeout_secs),
     }
 }

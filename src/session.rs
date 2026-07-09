@@ -12,8 +12,9 @@ use std::sync::OnceLock;
 
 static SESSIONS_PATH: OnceLock<PathBuf> = OnceLock::new();
 const MAX_SESSIONS: usize = 50;
-// ponytail: hard cap messages body so resume stays usable; upgrade = per-message tool trim
+// ponytail: hard caps so resume stays usable; raise if long-context session files matter
 const MAX_SESSION_MESSAGES: usize = 200;
+const MAX_MESSAGE_CHARS: usize = 4_000;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Session {
@@ -142,19 +143,53 @@ pub fn save_session(
         sessions = sessions[sessions.len() - MAX_SESSIONS..].to_vec();
     }
 
-    // Cap message trails so one chat path can't balloon ~/.nano_sessions.json.
     for session in &mut sessions {
-        if let Some(messages) = session.messages.as_mut()
-            && messages.len() > MAX_SESSION_MESSAGES
-        {
-            let drop = messages.len() - MAX_SESSION_MESSAGES;
-            messages.drain(0..drop);
+        if let Some(messages) = session.messages.as_mut() {
+            compact_messages(messages);
         }
     }
 
     if let Ok(data) = serde_json::to_string_pretty(&sessions) {
         let _ = atomic_write(sessions_path(), data.as_bytes());
     }
+}
+
+fn compact_messages(messages: &mut Vec<Value>) {
+    if messages.len() > MAX_SESSION_MESSAGES {
+        let drop = messages.len() - MAX_SESSION_MESSAGES;
+        messages.drain(0..drop);
+        // Prefer keeping a leading system message if we just dropped one into the hole.
+        // (Cheap: if first remaining isn't system but one exists later near head, leave it.)
+    }
+    for message in messages.iter_mut() {
+        trim_message_fields(message);
+    }
+}
+
+fn trim_message_fields(message: &mut Value) {
+    if let Some(content) = message.get_mut("content")
+        && let Some(text) = content.as_str()
+        && text.len() > MAX_MESSAGE_CHARS
+    {
+        *content = Value::String(truncate_keep_tail(text, MAX_MESSAGE_CHARS));
+    }
+    if let Some(output) = message.get_mut("output")
+        && let Some(text) = output.as_str()
+        && text.len() > MAX_MESSAGE_CHARS
+    {
+        *output = Value::String(truncate_keep_tail(text, MAX_MESSAGE_CHARS));
+    }
+}
+
+fn truncate_keep_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut start = text.len() - max;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[…truncated]\n{}", &text[start..])
 }
 
 /// Write via temp+rename so a crash mid-write can't leave a half JSON array.
@@ -254,15 +289,23 @@ mod tests {
 
     #[test]
     fn caps_session_messages_to_max() {
-        use super::MAX_SESSION_MESSAGES;
+        use super::{MAX_SESSION_MESSAGES, compact_messages};
         let mut messages = (0..(MAX_SESSION_MESSAGES + 25))
             .map(|i| serde_json::json!({"role": "user", "content": i.to_string()}))
             .collect::<Vec<_>>();
-        if messages.len() > MAX_SESSION_MESSAGES {
-            let drop = messages.len() - MAX_SESSION_MESSAGES;
-            messages.drain(0..drop);
-        }
+        compact_messages(&mut messages);
         assert_eq!(messages.len(), MAX_SESSION_MESSAGES);
         assert_eq!(messages[0]["content"], "25");
+    }
+
+    #[test]
+    fn trims_oversized_message_content() {
+        use super::{MAX_MESSAGE_CHARS, compact_messages};
+        let big = "x".repeat(MAX_MESSAGE_CHARS + 100);
+        let mut messages = vec![serde_json::json!({"role": "tool", "content": big})];
+        compact_messages(&mut messages);
+        let content = messages[0]["content"].as_str().unwrap();
+        assert!(content.len() <= MAX_MESSAGE_CHARS + 20);
+        assert!(content.starts_with("[…truncated]"));
     }
 }

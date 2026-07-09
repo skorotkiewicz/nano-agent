@@ -47,10 +47,19 @@ pub fn apply_generation_controls(
     }
 }
 
+fn looks_local_endpoint(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains("localhost")
+        || lower.contains("127.0.0.1")
+        || lower.contains("[::1]")
+        || lower.contains("0.0.0.0")
+}
+
 pub fn check_api_key() {
     let target = get_api_target();
     let env_key = env::var("OPENAI_API_KEY").unwrap_or_default();
-    if target.api_key.is_empty() && env_key.is_empty() {
+    // Local Ollama-style endpoints often need no key; don't force a fake secret.
+    if target.api_key.is_empty() && env_key.is_empty() && !looks_local_endpoint(&target.url) {
         eprintln!("set OPENAI_API_KEY or configure a provider in config.json");
         std::process::exit(1);
     }
@@ -77,10 +86,9 @@ pub fn print_effective_config() {
     } else {
         "(set)"
     };
-    let sandbox = nano_agent::sandbox::SandboxMode::from_env_value(
-        env::var("NANO_SANDBOX").ok().as_deref(),
-    )
-    .label();
+    let sandbox =
+        nano_agent::sandbox::SandboxMode::from_env_value(env::var("NANO_SANDBOX").ok().as_deref())
+            .label();
     let provider = config.get_provider().unwrap_or("(default)");
     let base_url_env = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "(unset)".to_string());
     let model_env = env::var("OPENAI_MODEL").unwrap_or_else(|_| "(unset)".to_string());
@@ -186,7 +194,7 @@ pub fn get_mito_target() -> Result<ApiTarget, String> {
 mod tests {
     use super::{
         ApiFormat, ApiTarget, apply_generation_controls, custom_provider_endpoint,
-        ensure_mito_target, resolve_api_key,
+        ensure_mito_target, looks_local_endpoint, resolve_api_key,
     };
 
     #[test]
@@ -236,5 +244,16 @@ mod tests {
         };
         let error = ensure_mito_target("local", target).unwrap_err();
         assert!(error.contains("responses providers are not supported"));
+    }
+
+    #[test]
+    fn local_endpoints_are_recognized() {
+        assert!(looks_local_endpoint(
+            "http://localhost:11434/v1/chat/completions"
+        ));
+        assert!(looks_local_endpoint(
+            "http://127.0.0.1:8080/v1/chat/completions"
+        ));
+        assert!(!looks_local_endpoint("https://api.openai.com/v1/responses"));
     }
 }

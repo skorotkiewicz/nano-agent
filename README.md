@@ -60,6 +60,7 @@ Point it anywhere with an OpenAI-compatible API:
 ```sh
 export OPENAI_BASE_URL=http://localhost:11434/v1   # e.g. Ollama
 export OPENAI_MODEL=gemma4
+# no API key required for localhost endpoints
 ```
 
 Or keep providers in `~/.config/nano/config.json` (or `./nano_config.json`):
