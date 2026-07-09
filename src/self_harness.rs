@@ -3,6 +3,7 @@
 use crate::prompt;
 use crate::provider::{ApiFormat, get_api_target};
 use crate::session::sessions_in_cwd;
+use crate::state::get_config;
 use reqwest::Client;
 use serde_json::Value;
 use std::env;
@@ -116,7 +117,7 @@ fn proposal_prompt(current_harness: &str, evidence: &str, validation_command: &s
 
 async fn ask_model(client: &Client, system: &str, prompt_text: &str) -> Result<String, String> {
     let target = get_api_target();
-    let body = match target.format {
+    let mut body = match target.format {
         ApiFormat::Responses => serde_json::json!({
             "model": target.model,
             "instructions": system,
@@ -130,6 +131,12 @@ async fn ask_model(client: &Client, system: &str, prompt_text: &str) -> Result<S
             ]
         }),
     };
+    if let Some(n) = get_config().get_max_tokens() {
+        body["max_tokens"] = n.into();
+    }
+    if let Some(t) = get_config().get_temperature() {
+        body["temperature"] = t.into();
+    }
 
     let mut req = client
         .post(&target.url)

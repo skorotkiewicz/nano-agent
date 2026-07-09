@@ -84,12 +84,45 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        // Check global config first (~/.config/nano/config.json)
-        if let Some(config) = Self::load_from_path(&config_path_global()) {
-            return config;
+        let global = Self::load_from_path(&config_path_global());
+        let local = Self::load_from_path(&config_path_local());
+        match (global, local) {
+            (Some(g), Some(l)) => g.merge(l),
+            (Some(g), None) => g,
+            (None, Some(l)) => l,
+            (None, None) => Self::default(),
         }
-        // Fallback to local config in cwd
-        Self::load_from_path(&config_path_local()).unwrap_or_default()
+    }
+
+    /// Overlay `other` (typically the local project config) on top of `self`
+    /// (typically the global config): explicit fields and map entries from
+    /// `other` win.
+    fn merge(mut self, other: Config) -> Config {
+        if other.model.is_some() {
+            self.model = other.model;
+        }
+        if other.provider.is_some() {
+            self.provider = other.provider;
+        }
+        if other.max_tokens.is_some() {
+            self.max_tokens = other.max_tokens;
+        }
+        if other.temperature.is_some() {
+            self.temperature = other.temperature;
+        }
+        if other.mito_mode.enabled {
+            self.mito_mode = other.mito_mode;
+        }
+        for (name, server) in other.custom_providers {
+            self.custom_providers.insert(name, server);
+        }
+        for (name, server) in other.mcp_servers {
+            self.mcp_servers.insert(name, server);
+        }
+        for (name, agent) in other.acp_agents {
+            self.acp_agents.insert(name, agent);
+        }
+        self
     }
 
     fn load_from_path(path: &PathBuf) -> Option<Self> {
@@ -309,5 +342,31 @@ mod tests {
         let parsed: Config = serde_json::from_str(config).unwrap();
         assert!(parsed.mito_mode.enabled);
         assert_eq!(parsed.mito_mode.provider.as_deref(), Some("local"));
+    }
+
+    #[test]
+    fn merge_overlays_local_fields_and_maps() {
+        let global: Config = serde_json::from_str(
+            r#"{
+                "model": "global-model",
+                "provider": "global",
+                "max_tokens": 100,
+                "custom_providers": {"a": {"provider_type": "openai", "base_url": "x"}}
+            }"#,
+        )
+        .unwrap();
+        let local: Config = serde_json::from_str(
+            r#"{
+                "model": "local-model",
+                "mcp_servers": {"semble": {"command": "uvx"}}
+            }"#,
+        )
+        .unwrap();
+        let merged = global.merge(local);
+        assert_eq!(merged.model.as_deref(), Some("local-model"));
+        assert_eq!(merged.provider.as_deref(), Some("global"));
+        assert_eq!(merged.max_tokens, Some(100));
+        assert!(merged.custom_providers.contains_key("a"));
+        assert!(merged.mcp_servers.contains_key("semble"));
     }
 }

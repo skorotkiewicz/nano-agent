@@ -46,7 +46,12 @@ pub fn acp_mode() -> bool {
 }
 
 pub fn get_model() -> &'static str {
-    MODEL.get_or_init(|| env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string()))
+    MODEL.get_or_init(|| {
+        env::var("OPENAI_MODEL")
+            .ok()
+            .or_else(|| get_config().get_model().map(String::from))
+            .unwrap_or_else(|| "gpt-5.5".to_string())
+    })
 }
 
 pub fn get_max_steps() -> usize {

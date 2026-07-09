@@ -14,6 +14,7 @@ use nano_agent::acp::AgentTask;
 use nano_agent::sandbox::Sandbox;
 use std::env;
 use std::io::{self, IsTerminal, Write};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, timeout};
@@ -265,15 +266,12 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
     approval_from_line(&choice)
 }
 
-async fn execute_shell(args: &serde_json::Value) -> String {
+async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bool)) -> String {
     let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
     let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
     let env_vars = args.get("env").and_then(|e| e.as_object());
 
-    let (run_cwd, writable_root, force_sandbox) = match prepare_shell_execution(args) {
-        Ok(prepared) => prepared,
-        Err(error) => return error,
-    };
+    let (run_cwd, writable_root, force_sandbox) = prepared;
 
     let merged_command = format!("{} 2>&1", command);
 
@@ -334,19 +332,20 @@ async fn execute_shell_tool(args: &serde_json::Value) -> Result<String, ToolCanc
     if desc.trim().is_empty() {
         return Ok("bad arguments: description is required".to_string());
     }
-    if let Err(error) = prepare_shell_execution(args) {
-        return Ok(error);
-    }
+    let prepared = match prepare_shell_execution(args) {
+        Ok(prepared) => prepared,
+        Err(error) => return Ok(error),
+    };
 
     let args_clone = args.clone();
     let approval = tokio::task::spawn_blocking(move || approve_sync(&args_clone))
         .await
         .unwrap_or(Approval::Deny);
     match approval {
-        Approval::Approve => Ok(execute_shell(args).await),
+        Approval::Approve => Ok(execute_shell(args, prepared).await),
         Approval::ApproveAll => {
             APPROVE_ALL.store(true, Ordering::SeqCst);
-            Ok(execute_shell(args).await)
+            Ok(execute_shell(args, prepared).await)
         }
         Approval::Deny => Ok(color("31", "denied by user")),
         Approval::Cancel => Err(ToolCancelled),
@@ -389,14 +388,12 @@ async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String>
                 Err(error) => return Some(format!("bad arguments: {error}")),
             };
 
-            // $$info
             if is_tty() {
                 eprintln!(
                     "{}",
                     color("90", &format!("→ delegate_task: {}", task.prompt))
                 );
             }
-            // $$info /
 
             Some(
                 get_acp_manager()
@@ -415,14 +412,12 @@ async fn handle_acp_tool(name: &str, args: &serde_json::Value) -> Option<String>
                 _ => return Some("bad arguments: tasks must be a non-empty array".to_string()),
             };
 
-            // $$info
             if is_tty() {
                 eprintln!(
                     "{}",
                     color("90", &format!("→ delegate_tasks: {} tasks", values.len()))
                 );
             }
-            // $$info /
 
             let mut tasks = Vec::new();
             for (index, value) in values.iter().enumerate() {

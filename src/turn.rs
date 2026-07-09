@@ -22,14 +22,14 @@ pub async fn run_state_turn(
     };
 
     let Ok((answer, prev_id, new_messages)) = result else {
-        return "cancelled".to_string();
+        return String::new();
     };
     let session_label = label.as_deref().unwrap_or(label_prompt);
 
     match state {
         SessionState::Responses { previous } => {
             if let Some(ref id) = prev_id {
-                save_session(id, session_label, None);
+                save_session(id, session_label, new_messages);
             }
             *previous = prev_id;
         }
@@ -57,6 +57,6 @@ pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
     };
     match result {
         Ok((answer, _, _)) => answer,
-        Err(_) => "cancelled".to_string(),
+        Err(_) => String::new(),
     }
 }

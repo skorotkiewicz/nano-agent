@@ -93,6 +93,12 @@ impl McpClient {
     pub fn status(&self) -> String {
         let connected = self.servers.try_lock().map(|s| s.len()).unwrap_or(0);
         let total = self.total_servers.try_lock().map(|t| *t).unwrap_or(0);
+        if connected == 0 && total > 0 {
+            let cached = self.tools.try_lock().map(|t| t.len()).unwrap_or(0);
+            if cached > 0 {
+                return format!("(mcp: cached {} tools)", cached);
+            }
+        }
         format!("(mcp: {}/{}) servers", connected, total)
     }
 

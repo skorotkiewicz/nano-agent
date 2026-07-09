@@ -64,7 +64,7 @@ pub async fn run_mito_turn(
     let (answer, _, new_messages) =
         match run_chat_with_system(client, prompt, mito_messages.clone(), &system, &target).await {
             Ok(result) => result,
-            Err(_) => return "mito > cancelled".to_string(),
+            Err(_) => return String::new(),
         };
 
     if let Some(messages) = new_messages {

@@ -24,6 +24,14 @@ pub fn check_api_key() {
         eprintln!("set OPENAI_API_KEY or configure a provider in config.json");
         std::process::exit(1);
     }
+    if target.model == "gpt-5.5"
+        && (get_config().get_provider().is_some() || env::var("OPENAI_BASE_URL").is_ok())
+    {
+        eprintln!(
+            "warning: no model configured; defaulting to '{}'. Set OPENAI_MODEL or a provider model.",
+            target.model
+        );
+    }
 }
 
 fn custom_provider_target(provider_name: &str, model: Option<String>) -> Option<ApiTarget> {

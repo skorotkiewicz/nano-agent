@@ -17,10 +17,27 @@ use nano_agent::acp::{AcpPrompt, AcpServer};
 use provider::{check_api_key, get_api_target};
 use reqwest::Client;
 use self_harness::{run_self_harness, strip_self_harness_prefix};
+use serde_json::Value;
 use session::{Session, SessionState, pick_session, sessions_in_cwd};
 use state::{color, get_config, get_mcp_client};
 use std::env;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+async fn route_prompt(
+    client: &Client,
+    prompt: &str,
+    state: &mut SessionState,
+    label: &mut Option<String>,
+    mito_messages: &mut Vec<Value>,
+) -> String {
+    if let Some(validation_command) = strip_self_harness_prefix(prompt) {
+        run_self_harness(client, validation_command).await
+    } else if let Some(mito_prompt) = strip_mito_prefix(prompt) {
+        run_mito_turn(client, mito_prompt, mito_messages, state, label).await
+    } else {
+        run_state_turn(client, prompt, state, label, prompt).await
+    }
+}
 use turn::run_state_turn;
 
 #[cfg(feature = "acp")]
@@ -99,21 +116,11 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
             continue;
         }
 
-        let answer = if let Some(validation_command) = strip_self_harness_prefix(&prompt) {
-            run_self_harness(client, validation_command).await
-        } else if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
-            run_mito_turn(
-                client,
-                mito_prompt,
-                &mut mito_messages,
-                &mut state,
-                &mut label,
-            )
-            .await
-        } else {
-            run_state_turn(client, &prompt, &mut state, &mut label, &prompt).await
-        };
-        println!("{}", answer);
+        let answer =
+            route_prompt(client, &prompt, &mut state, &mut label, &mut mito_messages).await;
+        if !answer.is_empty() {
+            println!("{}", answer);
+        }
     }
 }
 
@@ -182,21 +189,11 @@ async fn main() {
 
     if !prompt.is_empty() {
         let mut mito_messages = Vec::new();
-        let answer = if let Some(validation_command) = strip_self_harness_prefix(&prompt) {
-            run_self_harness(&client, validation_command).await
-        } else if let Some(mito_prompt) = strip_mito_prefix(&prompt) {
-            run_mito_turn(
-                &client,
-                mito_prompt,
-                &mut mito_messages,
-                &mut state,
-                &mut label,
-            )
-            .await
-        } else {
-            run_state_turn(&client, &prompt, &mut state, &mut label, &prompt).await
-        };
-        println!("{}", answer);
+        let answer =
+            route_prompt(&client, &prompt, &mut state, &mut label, &mut mito_messages).await;
+        if !answer.is_empty() {
+            println!("{}", answer);
+        }
     } else {
         repl(&client, state, label).await;
     }
