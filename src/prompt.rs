@@ -41,8 +41,12 @@ pub fn find_files(roots: Vec<String>, names: Vec<&str>, limit: usize) -> String 
     let mut found = Vec::new();
 
     for root in roots {
-        let root_path = if root.starts_with('~') {
-            home.join(&root[2..])
+        let root_path = if root == "~" {
+            home.clone()
+        } else if let Some(stripped) = root.strip_prefix("~/") {
+            home.join(stripped)
+        } else if let Some(stripped) = root.strip_prefix('~') {
+            home.join(stripped)
         } else {
             PathBuf::from(&root)
         };

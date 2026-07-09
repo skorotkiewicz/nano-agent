@@ -75,7 +75,10 @@ async fn respond_api(
         req = req.header("Authorization", format!("Bearer {}", target.api_key));
     }
 
-    let res = req.json(&body).send().await?.json().await;
+    let res = match req.json(&body).send().await {
+        Ok(http) => http.json().await,
+        Err(e) => Err(e),
+    };
 
     let _ = tx.send(true);
     if let Some(h) = spinner_handle {
@@ -215,7 +218,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
         }
 
         let mut outputs = Vec::new();
-        let mut tool_names: Vec<&str> = Vec::new();
+        let mut tool_invocations = Vec::new();
         let mut tool_messages = Vec::new();
         for call in &calls {
             let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -224,16 +227,16 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
             log_tool_call(name, args);
-            tool_names.push(name);
+            tool_invocations.push((name, args));
             let (output, message) = tool_output_responses(call).await?;
             outputs.push(output);
             tool_messages.push(message);
         }
         messages.push(serde_json::json!({
             "role": "assistant",
-            "tool_calls": tool_names
+            "tool_calls": tool_invocations
                 .iter()
-                .map(|n| serde_json::json!({"function": {"name": n}}))
+                .map(|(n, a)| serde_json::json!({"function": {"name": n, "arguments": a}}))
                 .collect::<Vec<_>>()
         }));
         messages.extend(tool_messages);
@@ -249,7 +252,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
             Err(e) => {
                 let err = format!("API Error: {}", e);
                 messages.push(serde_json::json!({"role": "assistant", "content": err}));
-                return Ok((err, prev_id, Some(messages)));
+                return Ok((err, None, Some(messages)));
             }
         };
         prev_id = response
@@ -281,7 +284,10 @@ async fn respond_chat_with_target(
         }
     }
     if expose_mcp_tools() {
-        for tool in get_mcp_client().get_tools_schema().await {
+        for mut tool in get_mcp_client().get_tools_schema().await {
+            if let Some(obj) = tool.as_object_mut() {
+                obj.remove("type");
+            }
             tools.push(serde_json::json!({"type": "function", "function": tool}));
         }
     }

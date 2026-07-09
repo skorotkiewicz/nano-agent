@@ -16,6 +16,8 @@ pub async fn run_state_turn(
     label: &mut Option<String>,
     label_prompt: &str,
 ) -> String {
+    crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
+
     let result = match state {
         SessionState::Responses { previous, .. } => {
             run_responses(client, prompt, previous.as_deref()).await
@@ -65,6 +67,7 @@ pub async fn run_state_turn(
 /// One stateless turn: no session persistence, no conversation carry-over.
 #[cfg(feature = "acp")]
 pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
+    crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
     let result = match get_api_target().format {
         ApiFormat::Responses => run_responses(client, prompt, None).await,
         ApiFormat::ChatCompletions => run_chat(client, prompt, vec![]).await,
