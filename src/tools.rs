@@ -446,7 +446,7 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         _ => color("90", "↵ no (type y)"),
     };
     eprint!(
-        "  {}  {}  {}  {}  {}  {} · ",
+        "  {}  {}  {}  {}  {}  {}",
         color("32", "[y]"),
         color("33", "[a]all"),
         color("36", "[s]safe"),
