@@ -20,9 +20,15 @@ pub async fn run_state_turn(
     crate::state::APPROVE_SAFE.store(false, std::sync::atomic::Ordering::SeqCst);
     crate::state::clear_cancel();
 
+    // `! cmd` notes for Responses are carried as a prefix on the next user message.
+    let prompt_for_api = match state.take_pending_context() {
+        Some(ctx) => format!("{ctx}\n\n{prompt}"),
+        None => prompt.to_string(),
+    };
+
     let result = match state {
         SessionState::Responses { previous, .. } => {
-            run_responses(client, prompt, previous.as_deref()).await
+            run_responses(client, &prompt_for_api, previous.as_deref()).await
         }
         SessionState::Chat { messages } => run_chat(client, prompt, messages.clone()).await,
     };
@@ -39,7 +45,9 @@ pub async fn run_state_turn(
     let session_label = label.as_deref().unwrap_or(label_prompt);
 
     match state {
-        SessionState::Responses { previous, messages } => {
+        SessionState::Responses {
+            previous, messages, ..
+        } => {
             if let Some(ref id) = prev_id {
                 let merged_messages = append_session_messages(messages, new_messages);
                 save_session(id, session_label, ApiFormat::Responses, merged_messages);

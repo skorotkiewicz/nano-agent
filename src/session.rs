@@ -32,6 +32,8 @@ pub enum SessionState {
     Responses {
         previous: Option<String>,
         messages: Vec<Value>,
+        /// Side-channel from `! cmd` to prepend onto the next user turn (Responses has no client messages array).
+        pending_context: Option<String>,
     },
     Chat {
         messages: Vec<Value>,
@@ -44,6 +46,7 @@ impl SessionState {
             ApiFormat::Responses => SessionState::Responses {
                 previous: None,
                 messages: vec![],
+                pending_context: None,
             },
             ApiFormat::ChatCompletions => SessionState::Chat { messages: vec![] },
         }
@@ -54,10 +57,51 @@ impl SessionState {
             ApiFormat::Responses => SessionState::Responses {
                 previous: Some(session.id),
                 messages: session.messages.unwrap_or_default(),
+                pending_context: None,
             },
             ApiFormat::ChatCompletions => SessionState::Chat {
                 messages: session.messages.unwrap_or_default(),
             },
+        }
+    }
+
+    /// Record a user-bang shell result for the next model turn (`!` only).
+    /// Plain text only — never ANSI (model / session JSON must not get escapes).
+    pub fn note_user_shell(&mut self, command: &str, output: &str) {
+        let note = format!("[user ran shell]\n$ {command}\n{output}");
+
+        match self {
+            SessionState::Chat { messages } => {
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": note,
+                }));
+            }
+            SessionState::Responses {
+                messages,
+                pending_context,
+                ..
+            } => {
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": note.clone(),
+                }));
+                // Stack notes if user runs several `!` before chatting.
+                *pending_context = Some(match pending_context.take() {
+                    Some(prev) => format!("{prev}\n\n{note}"),
+                    None => note,
+                });
+            }
+        }
+    }
+
+    /// Take Responses-only context to inject into the next user prompt.
+    pub fn take_pending_context(&mut self) -> Option<String> {
+        match self {
+            SessionState::Responses {
+                pending_context, ..
+            } => pending_context.take(),
+            SessionState::Chat { .. } => None,
         }
     }
 }
@@ -307,5 +351,27 @@ mod tests {
         let content = messages[0]["content"].as_str().unwrap();
         assert!(content.len() <= MAX_MESSAGE_CHARS + 20);
         assert!(content.starts_with("[…truncated]"));
+    }
+
+    #[test]
+    fn note_user_shell_marks_chat_and_responses() {
+        use super::SessionState;
+        use crate::provider::ApiFormat;
+
+        let mut chat = SessionState::new(ApiFormat::ChatCompletions);
+        chat.note_user_shell("cat a", "hello");
+        match &chat {
+            SessionState::Chat { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert!(messages[0]["content"].as_str().unwrap().contains("cat a"));
+            }
+            _ => panic!("expected chat"),
+        }
+
+        let mut resp = SessionState::new(ApiFormat::Responses);
+        resp.note_user_shell("pwd", "/tmp");
+        let pending = resp.take_pending_context().unwrap();
+        assert!(pending.contains("pwd"));
+        assert!(resp.take_pending_context().is_none());
     }
 }

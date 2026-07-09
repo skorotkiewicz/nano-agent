@@ -47,6 +47,13 @@ $ rg --files -t rust  [safe]
 
 REPL: `›` prompt · `:q` · `:reset` · `:config` · `/mito` · `/self-harness <validator>` · line ending `\` continues.
 
+**Shell shortcuts** (no approval — you typed it):
+
+```
+! cat text.md     # run; output printed + noted for the model's next turn
+!! cat secret.md  # run; printed only, model never sees it
+```
+
 **Cancel:** press **Esc** (or Ctrl+C) while the spinner shows `thinking · esc cancel`, or while a long shell command runs. Approval prompt still uses Esc to cancel the turn.
 
 ## Other models

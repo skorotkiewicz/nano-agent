@@ -44,6 +44,8 @@ fn print_usage() {
            :help              this help\n\
            /mito ...          local planner handoff\n\
            /self-harness <cmd> propose/keep harness after validator passes\n\
+           ! <cmd>            run shell; result shown to model next turn\n\
+           !! <cmd>           run shell; result NOT sent to model\n\
            line ending with \\ continues multiline input\n\
            Esc / Ctrl+C        cancel in-flight think or long shell\n\n\
          Env:\n\
@@ -64,6 +66,67 @@ fn http_client() -> Client {
         .unwrap_or_else(|_| Client::new())
 }
 
+/// `! cmd` (visible to model) or `!! cmd` (stdout only, hidden from model).
+fn strip_shell_bang(prompt: &str) -> Option<(bool, &str)> {
+    let trimmed = prompt.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("!!") {
+        // accept `!!cmd` or `!! cmd`
+        let cmd = rest.strip_prefix(' ').unwrap_or(rest).trim();
+        return (!cmd.is_empty()).then_some((false, cmd));
+    }
+    if let Some(rest) = trimmed.strip_prefix('!') {
+        // don't treat `!=` etc.; require space or start of shell-ish path
+        let cmd = rest.strip_prefix(' ').unwrap_or(rest).trim();
+        // `!/path` and `!cmd` ok; refuse pure `!`
+        return (!cmd.is_empty()).then_some((true, cmd));
+    }
+    None
+}
+
+/// Color only the leading `$` for the terminal. Session/model notes stay plain.
+fn display_shell_output(output: &str) -> String {
+    let mut lines = output.lines();
+    let Some(first) = lines.next() else {
+        return String::new();
+    };
+    let mut out = if let Some(rest) = first.strip_prefix("$ ") {
+        format!("{} {}", color("31", "$"), rest)
+    } else if first == "$" {
+        color("31", "$")
+    } else {
+        first.to_string()
+    };
+    for line in lines {
+        out.push('\n');
+        out.push_str(line);
+    }
+    if output.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+async fn run_bang_shell(state: &mut SessionState, visible: bool, command: &str) -> String {
+    let output = tools::run_user_shell(command).await;
+    // Always print for the human. Color `$` here only — not in model notes.
+    if visible {
+        state.note_user_shell(command, &output);
+        display_shell_output(&output).to_string()
+        // format!(
+        //     "{}\n{}",
+        //     display_shell_output(&output),
+        //     color("90", "→ noted for next model turn")
+        // )
+    } else {
+        display_shell_output(&output).to_string()
+        // format!(
+        //     "{}\n{}",
+        //     display_shell_output(&output),
+        //     color("90", "→ hidden from model")
+        // )
+    }
+}
+
 async fn route_prompt(
     client: &Client,
     prompt: &str,
@@ -71,6 +134,9 @@ async fn route_prompt(
     label: &mut Option<String>,
     mito_messages: &mut Vec<Value>,
 ) -> String {
+    if let Some((visible, command)) = strip_shell_bang(prompt) {
+        return run_bang_shell(state, visible, command).await;
+    }
     if let Some(validation_command) = strip_self_harness_prefix(prompt) {
         run_self_harness(client, validation_command).await
     } else if let Some(mito_prompt) = strip_mito_prefix(prompt) {
@@ -139,7 +205,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
         "{}",
         color(
             "90",
-            ":q quit · :reset · /mito · esc cancel · \\ multiline · -h help"
+            ":q · :reset · !shell · !!quiet · \\ multiline · /mito · esc · :help"
         )
     );
     let stdin = BufReader::new(tokio::io::stdin());
@@ -288,5 +354,39 @@ async fn main() {
         }
     } else {
         repl(&client, state, label).await;
+    }
+}
+
+#[cfg(test)]
+mod bang_tests {
+    use super::strip_shell_bang;
+
+    #[test]
+    fn bang_parses_visible_and_hidden() {
+        assert_eq!(
+            strip_shell_bang("! cat text.md"),
+            Some((true, "cat text.md"))
+        );
+        assert_eq!(
+            strip_shell_bang("!! cat text.md"),
+            Some((false, "cat text.md"))
+        );
+        assert_eq!(strip_shell_bang("!!ls"), Some((false, "ls")));
+        assert_eq!(strip_shell_bang("!ls -la"), Some((true, "ls -la")));
+        assert_eq!(strip_shell_bang("!"), None);
+        assert_eq!(strip_shell_bang("!!"), None);
+        assert_eq!(strip_shell_bang("hello"), None);
+        assert_eq!(strip_shell_bang("/mito x"), None);
+    }
+
+    #[test]
+    fn display_shell_output_colors_dollar_only() {
+        use super::display_shell_output;
+        let rendered = display_shell_output("$ ls\nexit 0\nok\n");
+        assert!(rendered.contains("ls"));
+        assert!(rendered.contains("exit 0"));
+        assert!(rendered.contains('$'));
+        // no color on rest of first command line body
+        assert!(rendered.contains(" ls") || rendered.contains("ls"));
     }
 }

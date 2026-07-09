@@ -417,7 +417,7 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         color("90", command) // color(risk_color, &format!("[{risk_label}]"))
     );
 
-    for key in &["cwd", "timeout", "env"] {
+    for key in &[/* "cwd", */ "timeout", "env"] {
         let val = args.get(*key);
         if let Some(v) = val
             && v != &serde_json::Value::Null
@@ -576,6 +576,22 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
 
 fn parse_tool_args(args_str: &str) -> Result<serde_json::Value, String> {
     serde_json::from_str(args_str).map_err(|e| format!("bad arguments: {}", e))
+}
+
+/// User-typed shell (`!` / `!!`): run through the same sandbox/path as tools, no approval prompt.
+pub async fn run_user_shell(command: &str) -> String {
+    let command = command.trim();
+    if command.is_empty() {
+        return "bad arguments: empty command".to_string();
+    }
+    let args = serde_json::json!({
+        "command": command,
+        "description": "user shell",
+    });
+    match prepare_shell_execution(&args) {
+        Ok(prepared) => execute_shell(&args, prepared).await,
+        Err(error) => error,
+    }
 }
 
 async fn execute_shell_tool(args: &serde_json::Value) -> Result<String, ToolCancelled> {
