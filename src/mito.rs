@@ -27,7 +27,6 @@ pub fn strip_mito_prefix(prompt: &str) -> Option<&str> {
 ///   2. Immediately after a blank line — i.e. `MITO_SEND:` is the first non-blank
 ///      line of a paragraph that follows an empty line. This lets the model emit
 ///      reasoning/explanation above the handoff without breaking parsing.
-///      Returns `None` if no such prefix is found.
 fn extract_mito_handoff(answer: &str) -> Option<String> {
     const PREFIX: &str = "MITO_SEND:";
     fn parse_handoff(text: &str) -> Option<String> {
@@ -43,14 +42,13 @@ fn extract_mito_handoff(answer: &str) -> Option<String> {
     let mut offset = 0;
     let mut previous_blank = false;
     for line in answer.split('\n') {
-        let trimmed = line.trim();
         if previous_blank {
             let leading = line.len() - line.trim_start().len();
             if line.trim_start().starts_with(PREFIX) {
                 return parse_handoff(&answer[offset + leading + PREFIX.len()..]);
             }
         }
-        previous_blank = trimmed.is_empty();
+        previous_blank = line.trim().is_empty();
         offset += line.len() + 1;
     }
 

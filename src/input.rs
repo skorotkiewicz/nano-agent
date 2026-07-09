@@ -1,13 +1,9 @@
+//! REPL line input: rich raw-mode editing when attached to a TTY, plain
+//! line reading otherwise.
+
+use crate::state::color;
 use std::io::{self, IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
-
-fn color(code: &str, text: &str) -> String {
-    if io::stderr().is_terminal() {
-        format!("\x1b[{}m{}\x1b[0m", code, text)
-    } else {
-        text.to_string()
-    }
-}
 
 fn repl_line_text(line: &str) -> (&str, bool) {
     let trimmed = line.trim_end();

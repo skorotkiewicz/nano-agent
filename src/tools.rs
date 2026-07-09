@@ -3,7 +3,9 @@
 
 use crate::input::{LineKey, RawTerminal, read_line_key};
 use crate::policy::{expose_mcp_tools, prepare_shell_execution};
-use crate::state::{APPROVE_ALL, acp_mode, color, env_flag_is_false, get_mcp_client};
+use crate::state::{
+    APPROVE_ALL, acp_mode, color, env_flag_is_false, get_mcp_client, truncate_tail,
+};
 #[cfg(feature = "acp")]
 use crate::{
     policy::expose_acp_delegate_tools,
@@ -22,18 +24,6 @@ use tokio::time::{Duration, timeout};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCancelled {
     User,
-}
-
-fn truncate_tail(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-
-    let mut start = text.len() - max;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    text[start..].to_string()
 }
 
 pub fn get_tool_responses() -> &'static serde_json::Value {
@@ -484,7 +474,7 @@ pub async fn dispatch_tool_call(name: &str, args_str: &str) -> Result<String, To
 
 #[cfg(test)]
 mod tests {
-    use super::{Approval, LineKey, approval_from_key, approval_from_line, truncate_tail};
+    use super::{Approval, LineKey, approval_from_key, approval_from_line};
 
     #[test]
     fn approval_choices_include_cancel() {
@@ -498,10 +488,5 @@ mod tests {
             approval_from_key(LineKey::Char('Y')),
             Some(Approval::Approve)
         );
-    }
-
-    #[test]
-    fn truncate_tail_respects_utf8_boundaries() {
-        assert_eq!(truncate_tail("prefix-ébc", 4), "ébc");
     }
 }

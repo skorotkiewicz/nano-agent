@@ -190,7 +190,6 @@ mod tests {
             api_key: String::new(),
             model: "gpt-test".to_string(),
         };
-
         let error = ensure_mito_target("local", target).unwrap_err();
         assert!(error.contains("responses providers are not supported"));
     }

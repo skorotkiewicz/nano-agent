@@ -3,7 +3,7 @@
 use crate::prompt;
 use crate::provider::{ApiFormat, apply_generation_controls, get_api_target};
 use crate::session::sessions_in_cwd;
-use crate::state::get_config;
+use crate::state::{get_config, truncate_tail};
 use reqwest::Client;
 use serde_json::Value;
 use std::env;
@@ -404,18 +404,6 @@ fn log_decision(
     old.push_str(&line);
     old.push('\n');
     let _ = fs::write(path, old);
-}
-
-fn truncate_tail(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
-    }
-
-    let mut start = text.len() - max;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    text[start..].to_string()
 }
 
 #[cfg(test)]

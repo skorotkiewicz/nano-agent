@@ -1,18 +1,197 @@
+//! MCP client: connect to stdio / HTTP servers, list and call tools, with a
+//! config-fingerprinted tool cache and name disambiguation.
+
 use crate::config::{Config, McpServerConfig};
-use crate::mcp::McpTool;
 use compact_str::CompactString;
+use rmcp::model::CallToolRequestParams;
+use rmcp::service::{Peer, RoleClient, RunningService, serve_client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::process::Command;
 use tokio::sync::Mutex;
-
-use super::server::McpServerHandle;
 
 const MCP_CACHE_VERSION: u8 = 1;
 const RESERVED_TOOL_NAMES: &[&str] = &["execute_shell", "delegate_task"];
+
+// ---------------------------------------------------------------------------
+// Tool
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpTool {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+    pub server_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_name: Option<String>,
+}
+
+impl McpTool {
+    pub fn new(name: String, description: String, parameters: Value, server_name: String) -> Self {
+        McpTool {
+            name,
+            description,
+            parameters,
+            server_name,
+            original_name: None,
+        }
+    }
+
+    /// The name to actually call on the server (the disambiguated exposure name
+    /// maps back to the server's original tool name).
+    pub fn call_name(&self) -> &str {
+        self.original_name.as_deref().unwrap_or(&self.name)
+    }
+
+    pub fn to_tool_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "function",
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Server handle
+// ---------------------------------------------------------------------------
+
+pub struct McpServerHandle {
+    pub server_name: CompactString,
+    pub running_service: RunningService<RoleClient, ()>,
+    tools: Vec<McpTool>,
+}
+
+impl McpServerHandle {
+    pub async fn connect(
+        server_name: CompactString,
+        config: &McpServerConfig,
+    ) -> Result<Self, String> {
+        let running_service = if let Some(url) = &config.url {
+            let mut cfg = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url.as_str());
+            if !config.headers.is_empty() {
+                let headers = parse_headers(&config.headers)?;
+                cfg = cfg.custom_headers(headers);
+            }
+            let transport =
+                rmcp::transport::streamable_http_client::StreamableHttpClientTransport::from_config(
+                    cfg,
+                );
+            serve_client((), transport)
+                .await
+                .map_err(|e| format!("MCP HTTP connection failed for '{}': {}", server_name, e))?
+        } else {
+            let command = config
+                .command
+                .as_ref()
+                .ok_or("command or url required for MCP server")?;
+
+            let mut cmd = Command::new(command);
+            cmd.args(&config.args);
+            for (key, val) in &config.env {
+                cmd.env(key, val);
+            }
+            if !config.show_logs {
+                cmd.stderr(Stdio::null());
+            }
+
+            let transport = rmcp::transport::TokioChildProcess::new(cmd)
+                .map_err(|e| format!("Failed to create transport: {}", e))?;
+
+            serve_client((), transport)
+                .await
+                .map_err(|e| format!("MCP connection failed for '{}': {}", server_name, e))?
+        };
+
+        Ok(Self {
+            server_name,
+            running_service,
+            tools: Vec::new(),
+        })
+    }
+
+    pub fn peer(&self) -> Peer<RoleClient> {
+        self.running_service.peer().clone()
+    }
+
+    pub async fn list_tools(&mut self) -> Result<Vec<McpTool>, String> {
+        let tools = self
+            .running_service
+            .peer()
+            .list_all_tools()
+            .await
+            .map_err(|e| format!("List tools failed: {}", e))?;
+
+        let result: Vec<McpTool> = tools
+            .into_iter()
+            .map(|t| McpTool {
+                name: t.name.to_string(),
+                original_name: None,
+                description: t
+                    .description
+                    .as_ref()
+                    .map(|d| d.to_string())
+                    .unwrap_or_default(),
+                parameters: serde_json::to_value(&t.input_schema).unwrap_or_default(),
+                server_name: self.server_name.to_string(),
+            })
+            .collect();
+
+        self.tools = result.clone();
+        Ok(result)
+    }
+
+    pub async fn call_tool(&self, tool_name: &str, args: Value) -> Result<String, String> {
+        let arguments: Option<rmcp::model::JsonObject> = serde_json::from_value(args).ok();
+
+        let params = arguments
+            .map(|a| CallToolRequestParams::new(tool_name.to_string()).with_arguments(a))
+            .unwrap_or_else(|| CallToolRequestParams::new(tool_name.to_string()));
+
+        let result = self
+            .running_service
+            .peer()
+            .call_tool(params)
+            .await
+            .map_err(|e| format!("Tool call failed: {}", e))?;
+
+        let mut content = String::new();
+        for item in result.content {
+            if let rmcp::model::RawContent::Text(t) = item.raw {
+                content.push_str(&t.text);
+            }
+        }
+
+        Ok(content)
+    }
+}
+
+fn parse_headers(
+    headers: &HashMap<String, String>,
+) -> Result<HashMap<http::HeaderName, http::HeaderValue>, String> {
+    let mut result = HashMap::new();
+    for (name, value) in headers {
+        let h_name: http::HeaderName = name
+            .parse()
+            .map_err(|e| format!("Invalid header name '{}': {}", name, e))?;
+        let h_value: http::HeaderValue = value
+            .parse()
+            .map_err(|e| format!("Invalid header value for '{}': {}", name, e))?;
+        result.insert(h_name, h_value);
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Client (with cache + lazy refresh)
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
 struct McpToolCache {
@@ -201,7 +380,6 @@ impl McpClient {
             (server_name, config, call_name)
         };
 
-        // Check if already connected, if not connect lazily
         {
             let mut servers = self.servers.lock().await;
             if !servers.contains_key(&server_name) {
@@ -209,7 +387,7 @@ impl McpClient {
                 let mut server =
                     McpServerHandle::connect(CompactString::new(server_name.clone()), &config)
                         .await?;
-                server.list_tools().await?; // Initialize tools
+                server.list_tools().await?;
                 servers.insert(server_name.clone(), server);
             }
         }
@@ -239,6 +417,10 @@ impl Default for McpClient {
         Self::new()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(String, String)> {
     let mut pairs = map
@@ -291,6 +473,8 @@ fn sanitize_tool_name_part(input: &str) -> String {
     }
 }
 
+/// Rename duplicates and reserved collisions to `server__tool`, keeping the
+/// original name for the actual server call.
 fn disambiguate_tools(tools: &mut [McpTool]) {
     let mut counts = HashMap::new();
     for tool in tools.iter() {
@@ -300,7 +484,7 @@ fn disambiguate_tools(tools: &mut [McpTool]) {
     let mut used = RESERVED_TOOL_NAMES
         .iter()
         .map(|name| (*name).to_string())
-        .collect::<HashSet<_>>();
+        .collect::<std::collections::HashSet<_>>();
     used.extend(
         tools
             .iter()

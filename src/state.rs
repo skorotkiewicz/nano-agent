@@ -71,6 +71,18 @@ pub fn color(code: &str, text: &str) -> String {
     }
 }
 
+/// Keep the tail of `text` (respecting UTF-8 boundaries) when over `max` bytes.
+pub fn truncate_tail(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut start = text.len() - max;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_string()
+}
+
 pub fn env_flag_is_false(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -86,6 +98,16 @@ pub fn context_cwd() -> PathBuf {
     {
         return cwd;
     }
-
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_tail;
+
+    #[test]
+    fn truncate_tail_respects_utf8_boundaries() {
+        assert_eq!(truncate_tail("prefix-ébc", 4), "ébc");
+        assert_eq!(truncate_tail("short", 100), "short");
+    }
 }

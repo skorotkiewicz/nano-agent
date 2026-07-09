@@ -1,3 +1,5 @@
+//! Command sandboxing with bubblewrap (bwrap).
+
 use std::path::PathBuf;
 
 use tokio::process::Command;
@@ -82,6 +84,8 @@ fn hidden_roots(restrict_to_cwd: bool) -> Vec<PathBuf> {
     roots
 }
 
+/// Recreate any parent directories of `bind_path` that live under a hidden root,
+/// so the bind mount target exists inside the sandbox.
 fn bind_mountpoint_dirs(cmd: &mut Command, bind_path: &std::path::Path, hidden_roots: &[PathBuf]) {
     let Some(parent) = bind_path.parent() else {
         return;
@@ -126,7 +130,6 @@ mod tests {
     #[test]
     fn test_sandbox_with_empty_shell_keeps_default() {
         let sb = Sandbox::new(false).with_shell("");
-        // Empty string should keep the original shell (bash)
         assert_eq!(sb.shell, "bash");
     }
 

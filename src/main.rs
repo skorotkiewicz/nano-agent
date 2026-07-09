@@ -23,6 +23,8 @@ use state::{color, get_config, get_mcp_client};
 use std::env;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use turn::run_state_turn;
+
 async fn route_prompt(
     client: &Client,
     prompt: &str,
@@ -38,7 +40,6 @@ async fn route_prompt(
         run_state_turn(client, prompt, state, label, prompt).await
     }
 }
-use turn::run_state_turn;
 
 #[cfg(feature = "acp")]
 async fn run_acp_server() -> Result<(), String> {
@@ -177,7 +178,6 @@ async fn main() {
 
     check_api_key();
 
-    // Load MCP servers
     get_mcp_client().load_servers(get_config()).await;
 
     let client = Client::new();

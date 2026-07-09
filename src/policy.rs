@@ -19,12 +19,12 @@ fn acp_tools_enabled() -> bool {
     if !acp_mode() {
         return true;
     }
-
     env::var(NANO_ACP_TOOLS_ENV)
         .map(|value| !env_flag_is_false(&value))
         .unwrap_or(true)
 }
 
+/// Whether the local `execute_shell` tool is offered to the model.
 pub fn expose_execute_shell_tools() -> bool {
     acp_tools_enabled()
 }
@@ -34,6 +34,7 @@ pub fn expose_acp_delegate_tools() -> bool {
     acp_tools_enabled()
 }
 
+/// Whether MCP tools are offered. Disabled inside a restricted ACP child.
 pub fn expose_mcp_tools() -> bool {
     !acp_spawn_policy_active()
 }

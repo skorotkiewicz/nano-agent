@@ -1,3 +1,5 @@
+//! Path helpers: lexical normalization and containment checks.
+
 use std::path::{Component, Path, PathBuf};
 
 /// Lexically normalize a path: resolve `.` and `..` components without

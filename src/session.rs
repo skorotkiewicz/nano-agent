@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 static SESSIONS_PATH: OnceLock<PathBuf> = OnceLock::new();
+const MAX_SESSIONS: usize = 50;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Session {
@@ -59,6 +60,7 @@ impl SessionState {
 }
 
 impl Session {
+    /// A legacy `chat-session` id with no stored format is a chat-completions session.
     pub fn resolved_format(&self) -> ApiFormat {
         self.format.unwrap_or_else(|| {
             if self.id == "chat-session" {
@@ -134,8 +136,8 @@ pub fn save_session(
         messages,
     });
 
-    if sessions.len() > 50 {
-        sessions = sessions[sessions.len() - 50..].to_vec();
+    if sessions.len() > MAX_SESSIONS {
+        sessions = sessions[sessions.len() - MAX_SESSIONS..].to_vec();
     }
 
     if let Ok(data) = serde_json::to_string_pretty(&sessions) {
@@ -219,7 +221,6 @@ mod tests {
             format: None,
             messages: None,
         };
-
         assert_eq!(session.resolved_format(), ApiFormat::ChatCompletions);
     }
 }

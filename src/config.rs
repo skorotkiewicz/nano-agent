@@ -1,3 +1,5 @@
+//! Configuration: load, merge, and expose provider/MCP/ACP/mito settings.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -133,6 +135,7 @@ impl Config {
     }
 }
 
+/// Accept the `mito_mode` alias but store it as the canonical `mito-mode` key.
 fn normalize_config_value(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
@@ -144,6 +147,7 @@ fn normalize_config_value(value: &mut Value) {
     }
 }
 
+/// Deep-merge `overlay` onto `base`, treating overlapping objects as merges.
 fn merge_config_value(base: &mut Value, overlay: Value) {
     match (base, overlay) {
         (Value::Object(base_map), Value::Object(overlay_map)) => {
@@ -212,7 +216,6 @@ mod tests {
     #[test]
     fn test_config_load_missing() {
         let config = Config::load();
-        // Should return default without error
         assert!(config.model.is_none() || config.model.is_some());
     }
 
@@ -247,11 +250,7 @@ mod tests {
 
     #[test]
     fn test_mcp_server_config_defaults() {
-        let config = r#"{
-            "mcp_servers": {
-                "test": {}
-            }
-        }"#;
+        let config = r#"{ "mcp_servers": { "test": {} } }"#;
         let parsed: Config = serde_json::from_str(config).unwrap();
         let server = parsed.mcp_servers.get("test").unwrap();
         assert!(server.command.is_none());
@@ -264,16 +263,10 @@ mod tests {
     #[test]
     fn test_mcp_server_config_show_logs() {
         let config = r#"{
-            "mcp_servers": {
-                "local": {
-                    "command": "uvx",
-                    "show_logs": true
-                }
-            }
+            "mcp_servers": { "local": { "command": "uvx", "show_logs": true } }
         }"#;
         let parsed: Config = serde_json::from_str(config).unwrap();
-        let server = parsed.mcp_servers.get("local").unwrap();
-        assert!(server.show_logs);
+        assert!(parsed.mcp_servers.get("local").unwrap().show_logs);
     }
 
     #[test]
@@ -282,9 +275,7 @@ mod tests {
             "mcp_servers": {
                 "context7": {
                     "url": "https://mcp.context7.com/mcp",
-                    "headers": {
-                        "CONTEXT7_API_KEY": "ctx7sk-..."
-                    }
+                    "headers": { "CONTEXT7_API_KEY": "ctx7sk-..." }
                 }
             }
         }"#;
@@ -318,11 +309,7 @@ mod tests {
     #[test]
     fn test_load_config_with_mito_mode() {
         let config = r#"{
-            "mito-mode": {
-                "enabled": true,
-                "provider": "local-gemma4",
-                "model": "gemma4"
-            }
+            "mito-mode": { "enabled": true, "provider": "local-gemma4", "model": "gemma4" }
         }"#;
         let parsed: Config = serde_json::from_str(config).unwrap();
         let mito = parsed.get_mito_mode();
@@ -333,12 +320,7 @@ mod tests {
 
     #[test]
     fn test_load_config_with_mito_mode_alias() {
-        let config = r#"{
-            "mito_mode": {
-                "enabled": true,
-                "provider": "local"
-            }
-        }"#;
+        let config = r#"{ "mito_mode": { "enabled": true, "provider": "local" } }"#;
         let parsed: Config = serde_json::from_str(config).unwrap();
         assert!(parsed.mito_mode.enabled);
         assert_eq!(parsed.mito_mode.provider.as_deref(), Some("local"));
@@ -356,10 +338,7 @@ mod tests {
         )
         .unwrap();
         let local: Value = serde_json::from_str(
-            r#"{
-                "model": "local-model",
-                "mcp_servers": {"semble": {"command": "uvx"}}
-            }"#,
+            r#"{ "model": "local-model", "mcp_servers": {"semble": {"command": "uvx"}} }"#,
         )
         .unwrap();
         merge_config_value(&mut global, local);
@@ -373,23 +352,11 @@ mod tests {
 
     #[test]
     fn merge_allows_local_mito_mode_to_disable_global() {
-        let mut global: Value = serde_json::from_str(
-            r#"{
-                "mito-mode": {
-                    "enabled": true,
-                    "provider": "global"
-                }
-            }"#,
-        )
-        .unwrap();
-        let mut local: Value = serde_json::from_str(
-            r#"{
-                "mito_mode": {
-                    "enabled": false
-                }
-            }"#,
-        )
-        .unwrap();
+        let mut global: Value =
+            serde_json::from_str(r#"{ "mito-mode": { "enabled": true, "provider": "global" } }"#)
+                .unwrap();
+        let mut local: Value =
+            serde_json::from_str(r#"{ "mito_mode": { "enabled": false } }"#).unwrap();
         normalize_config_value(&mut local);
         merge_config_value(&mut global, local);
         let merged: Config = serde_json::from_value(global).unwrap();
