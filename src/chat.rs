@@ -1,10 +1,11 @@
 //! API interaction: request sending (with spinner) and the tool-call loops
 //! for both the Responses API and the Chat Completions API.
 
+use crate::input::CancelListen;
 use crate::policy::{expose_execute_shell_tools, expose_mcp_tools};
 use crate::prompt::get_system;
 use crate::provider::{ApiTarget, apply_generation_controls, get_api_target};
-use crate::state::{color, get_config, get_max_steps, get_mcp_client, is_tty};
+use crate::state::{color, get_config, get_max_steps, get_mcp_client, is_tty, request_cancel};
 use crate::tools::{ToolCancelled, dispatch_tool_call, get_tool_chat, get_tool_responses};
 #[cfg(feature = "acp")]
 use crate::{
@@ -14,6 +15,21 @@ use crate::{
 use reqwest::Client;
 use std::io::{self, Write};
 use tokio::time::Duration;
+
+#[derive(Debug)]
+enum ApiCallError {
+    Failed(String),
+    Cancelled,
+}
+
+impl From<ApiCallError> for String {
+    fn from(value: ApiCallError) -> Self {
+        match value {
+            ApiCallError::Failed(s) => s,
+            ApiCallError::Cancelled => "cancelled".to_string(),
+        }
+    }
+}
 
 /// `(answer, session_id, chat_messages)` for one completed turn.
 pub type TurnOutcome =
@@ -26,7 +42,8 @@ pub enum TurnCancelled {
 
 impl TurnCancelled {
     pub fn should_report(self) -> bool {
-        !matches!(self, Self::User)
+        // Always show a quiet line for user cancel (esc during think / tool cancel).
+        matches!(self, Self::User)
     }
 }
 
@@ -81,16 +98,29 @@ async fn respond_api(
     client: &Client,
     target: &ApiTarget,
     body: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, ApiCallError> {
     let (tx, mut rx) = tokio::sync::watch::channel(false);
+    let cancel = if crate::state::acp_mode() {
+        None
+    } else {
+        CancelListen::start()
+    };
+    let show_esc = cancel.is_some();
     let spinner_handle = if is_tty() {
         Some(tokio::spawn(async move {
             let frames = ['-', '\\', '|', '/'];
             let mut index = 0;
+            let hint = if show_esc { " · esc cancel" } else { "" };
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                        eprint!("\r  {}\x1b[0K", color("90", &format!("{} thinking", frames[index % frames.len()])));
+                        eprint!(
+                            "\r  {}\x1b[0K",
+                            color(
+                                "90",
+                                &format!("{} thinking{hint}", frames[index % frames.len()])
+                            )
+                        );
                         let _ = io::stderr().flush();
                         index += 1;
                     }
@@ -114,13 +144,34 @@ async fn respond_api(
         req = req.header("Authorization", format!("Bearer {}", target.api_key));
     }
 
-    let res = async {
-        let http = req.json(&body).send().await.map_err(|e| e.to_string())?;
+    let api = async {
+        let http = req
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ApiCallError::Failed(e.to_string()))?;
         let status = http.status();
-        let raw = http.text().await.map_err(|e| e.to_string())?;
-        parse_api_body(status, &raw)
-    }
-    .await;
+        let raw = http
+            .text()
+            .await
+            .map_err(|e| ApiCallError::Failed(e.to_string()))?;
+        parse_api_body(status, &raw).map_err(ApiCallError::Failed)
+    };
+
+    let res = if let Some(ref cancel) = cancel {
+        tokio::select! {
+            res = api => res,
+            _ = cancel.wait() => {
+                request_cancel();
+                Err(ApiCallError::Cancelled)
+            }
+        }
+    } else {
+        api.await
+    };
+
+    // Drop cancel listener before spinner cleanup so terminal is cooked for next line
+    drop(cancel);
 
     let _ = tx.send(true);
     if let Some(h) = spinner_handle {
@@ -141,11 +192,28 @@ fn log_tool_call(name: &str, args: &str) {
 
 // --- Responses API Mode ---
 
+/// Provider glitch → Ok with API Error text. User Esc → Err(TurnCancelled).
+fn handle_api_result(
+    result: Result<serde_json::Value, ApiCallError>,
+    messages: &mut Vec<serde_json::Value>,
+    prev_id: Option<String>,
+) -> Result<serde_json::Value, TurnOutcome> {
+    match result {
+        Ok(r) => Ok(r),
+        Err(ApiCallError::Cancelled) => Err(Err(TurnCancelled::User)),
+        Err(ApiCallError::Failed(e)) => {
+            let err = format!("API Error: {e}");
+            messages.push(serde_json::json!({"role": "assistant", "content": err}));
+            Err(Ok((err, prev_id, Some(messages.clone()))))
+        }
+    }
+}
+
 async fn respond_responses(
     client: &Client,
     payload: serde_json::Value,
     previous: Option<&str>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, ApiCallError> {
     let target = get_api_target();
     let mut tools: Vec<serde_json::Value> = Vec::new();
     if expose_execute_shell_tools() {
@@ -235,13 +303,13 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
     // wipe previous_response_id and break -c/-s resume.
     let mut prev_id = previous.map(String::from);
 
-    let mut response = match respond_responses(client, payload, previous).await {
+    let mut response = match handle_api_result(
+        respond_responses(client, payload, previous).await,
+        &mut messages,
+        prev_id.clone(),
+    ) {
         Ok(r) => r,
-        Err(e) => {
-            let err = format!("API Error: {}", e);
-            messages.push(serde_json::json!({"role": "assistant", "content": err}));
-            return Ok((err, prev_id, Some(messages)));
-        }
+        Err(outcome) => return outcome,
     };
 
     if let Some(id) = response.get("id").and_then(|i| i.as_str()) {
@@ -289,19 +357,18 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
         }));
         messages.extend(tool_messages);
 
-        response = match respond_responses(
-            client,
-            serde_json::Value::Array(outputs),
-            prev_id.as_deref(),
-        )
-        .await
-        {
+        response = match handle_api_result(
+            respond_responses(
+                client,
+                serde_json::Value::Array(outputs),
+                prev_id.as_deref(),
+            )
+            .await,
+            &mut messages,
+            prev_id.clone(),
+        ) {
             Ok(r) => r,
-            Err(e) => {
-                let err = format!("API Error: {}", e);
-                messages.push(serde_json::json!({"role": "assistant", "content": err}));
-                return Ok((err, prev_id, Some(messages)));
-            }
+            Err(outcome) => return outcome,
         };
         if let Some(id) = response.get("id").and_then(|i| i.as_str()) {
             prev_id = Some(id.to_string());
@@ -334,7 +401,7 @@ async fn respond_chat_with_target(
     client: &Client,
     messages: &[serde_json::Value],
     target: &ApiTarget,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, ApiCallError> {
     let mut tools = Vec::new();
     if expose_execute_shell_tools() {
         tools.push(serde_json::json!({"type": "function", "function": get_tool_chat()}));
@@ -441,11 +508,14 @@ pub async fn run_chat_with_system(
     ensure_system_message(&mut messages, system);
     messages.push(serde_json::json!({"role": "user", "content": prompt}));
 
-    let mut response =
-        match respond_chat_with_target(client, &prepare_chat_messages(&messages), target).await {
-            Ok(r) => r,
-            Err(e) => return Ok((format!("API Error: {}", e), None, Some(messages))),
-        };
+    let mut response = match handle_api_result(
+        respond_chat_with_target(client, &prepare_chat_messages(&messages), target).await,
+        &mut messages,
+        None,
+    ) {
+        Ok(r) => r,
+        Err(outcome) => return outcome,
+    };
 
     for _ in 0..get_max_steps() {
         let choice = response
@@ -498,17 +568,13 @@ pub async fn run_chat_with_system(
             messages.push(output);
         }
 
-        response = match respond_chat_with_target(client, &prepare_chat_messages(&messages), target)
-            .await
-        {
+        response = match handle_api_result(
+            respond_chat_with_target(client, &prepare_chat_messages(&messages), target).await,
+            &mut messages,
+            Some("chat-session".to_string()),
+        ) {
             Ok(r) => r,
-            Err(e) => {
-                return Ok((
-                    format!("API Error: {}", e),
-                    Some("chat-session".to_string()),
-                    Some(messages),
-                ));
-            }
+            Err(outcome) => return outcome,
         };
     }
 
@@ -525,9 +591,9 @@ mod tests {
     use crate::tools::ToolCancelled;
 
     #[test]
-    fn user_tool_cancel_is_silent() {
+    fn user_cancel_reports_quiet_line() {
         let cancelled: TurnCancelled = ToolCancelled::User.into();
-        assert!(!cancelled.should_report());
+        assert!(cancelled.should_report());
     }
 
     #[test]

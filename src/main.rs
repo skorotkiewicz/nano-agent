@@ -44,7 +44,8 @@ fn print_usage() {
            :help              this help\n\
            /mito ...          local planner handoff\n\
            /self-harness <cmd> propose/keep harness after validator passes\n\
-           line ending with \\ continues multiline input\n\n\
+           line ending with \\ continues multiline input\n\
+           Esc / Ctrl+C        cancel in-flight think or long shell\n\n\
          Env:\n\
            OPENAI_API_KEY     required unless provider sets a key\n\
            OPENAI_BASE_URL    OpenAI-compatible base (implies chat-completions)\n\
@@ -138,7 +139,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
         "{}",
         color(
             "90",
-            ":q quit · :reset · /mito · /self-harness · \\ multiline · -h help"
+            ":q quit · :reset · /mito · esc cancel · \\ multiline · -h help"
         )
     );
     let stdin = BufReader::new(tokio::io::stdin());

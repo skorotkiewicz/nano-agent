@@ -18,6 +18,7 @@ pub async fn run_state_turn(
 ) -> String {
     crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
     crate::state::APPROVE_SAFE.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::state::clear_cancel();
 
     let result = match state {
         SessionState::Responses { previous, .. } => {
@@ -30,7 +31,7 @@ pub async fn run_state_turn(
         Ok(values) => values,
         Err(cancelled) => {
             if cancelled.should_report() {
-                eprintln!("{}", color("90", "cancelled"));
+                eprintln!("{}", color("90", "cancelled (esc)"));
             }
             return String::new();
         }
@@ -70,6 +71,7 @@ pub async fn run_state_turn(
 pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
     crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
     crate::state::APPROVE_SAFE.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::state::clear_cancel();
     let result = match get_api_target().format {
         ApiFormat::Responses => run_responses(client, prompt, None).await,
         ApiFormat::ChatCompletions => run_chat(client, prompt, vec![]).await,
@@ -78,7 +80,7 @@ pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
         Ok((answer, _, _)) => answer,
         Err(cancelled) => {
             if cancelled.should_report() {
-                eprintln!("{}", color("90", "cancelled"));
+                eprintln!("{}", color("90", "cancelled (esc)"));
             }
             String::new()
         }

@@ -216,6 +216,68 @@ fn read_escape_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey> {
     }
 }
 
+/// Background Esc/Ctrl+C listener for API/tool waits.
+/// Dropping the guard stops the thread and restores cooked mode.
+pub(crate) struct CancelListen {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CancelListen {
+    /// Start listening only when stdin+stderr are TTYs (not in ACP pipes).
+    pub(crate) fn start() -> Option<Self> {
+        if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+            return None;
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_t = stop.clone();
+        let fired_t = fired.clone();
+        let handle = std::thread::spawn(move || {
+            let Ok(_raw) = RawTerminal::enter() else {
+                return;
+            };
+            // stty sets min=0 time=1 → read returns Ok(0) ~every 100ms when idle
+            let mut stdin = io::stdin().lock();
+            let mut buf = [0u8; 1];
+            while !stop_t.load(std::sync::atomic::Ordering::SeqCst) {
+                match stdin.read(&mut buf) {
+                    Ok(1) if buf[0] == 27 || buf[0] == 3 => {
+                        fired_t.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return;
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+        });
+        Some(Self {
+            stop,
+            fired,
+            handle: Some(handle),
+        })
+    }
+
+    pub(crate) fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) async fn wait(&self) {
+        while !self.fired() && !self.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+    }
+}
+
+impl Drop for CancelListen {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 pub(crate) fn read_line_key(stdin: &mut io::StdinLock<'_>) -> io::Result<LineKey> {
     let byte = read_required_byte(stdin)?;
     match byte {

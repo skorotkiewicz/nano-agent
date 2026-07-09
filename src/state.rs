@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
 /// After the user picks [s] Safe, auto-approve read-only command patterns this turn.
 pub static APPROVE_SAFE: AtomicBool = AtomicBool::new(false);
+/// Set when the user hits Esc/Ctrl+C mid-turn (API wait or long shell).
+pub static CANCEL_TURN: AtomicBool = AtomicBool::new(false);
 pub static ACP_MODE: AtomicBool = AtomicBool::new(false);
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
@@ -45,6 +47,14 @@ pub fn is_tty() -> bool {
 
 pub fn acp_mode() -> bool {
     ACP_MODE.load(Ordering::SeqCst)
+}
+
+pub fn clear_cancel() {
+    CANCEL_TURN.store(false, Ordering::SeqCst);
+}
+
+pub fn request_cancel() {
+    CANCEL_TURN.store(true, Ordering::SeqCst);
 }
 
 pub fn get_model() -> &'static str {

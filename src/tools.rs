@@ -1,9 +1,12 @@
 //! Tool schemas, the user approval prompt, shell execution, and dispatch of
 //! model tool calls (shell, ACP delegation, MCP).
 
+use crate::input::CancelListen;
 use crate::input::{LineKey, RawTerminal, read_line_key};
 use crate::policy::{expose_mcp_tools, prepare_shell_execution};
-use crate::state::{APPROVE_ALL, APPROVE_SAFE, acp_mode, color, get_mcp_client, truncate_tail};
+use crate::state::{
+    APPROVE_ALL, APPROVE_SAFE, acp_mode, color, get_mcp_client, request_cancel, truncate_tail,
+};
 #[cfg(feature = "acp")]
 use crate::{
     policy::expose_acp_delegate_tools,
@@ -398,8 +401,9 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         eprintln!("{}", color("90", &format!("# {description}")));
     }
     eprintln!(
-        "{} {}",
-        color("90", &format!("$ {command}")),
+        "{} {} {}",
+        color("31", &format!("$ ")),
+        color("90", &format!("{command}")),
         color(risk_color, &format!("[{risk_label}]"))
     );
 
@@ -500,10 +504,31 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
     cmd.envs(merge_shell_env(env_vars));
 
     cmd.stdout(std::process::Stdio::piped());
-    // ponytail: kill_on_drop so timeout abort reaps the child; futures cancel otherwise leaks it
+    // ponytail: kill_on_drop so timeout/cancel reaps the child
     cmd.kill_on_drop(true);
 
-    let output_result = timeout(Duration::from_secs(timeout_secs), cmd.output()).await;
+    let cancel = if acp_mode() {
+        None
+    } else {
+        CancelListen::start()
+    };
+    let output_result = match cancel {
+        Some(cancel) => {
+            let timed = timeout(Duration::from_secs(timeout_secs), cmd.output());
+            tokio::select! {
+                res = timed => {
+                    drop(cancel);
+                    res
+                }
+                _ = cancel.wait() => {
+                    request_cancel();
+                    drop(cancel); // kill_on_drop reaps shell when select cancels timed future
+                    return format!("$ {command}\ncancelled by user (esc)\n");
+                }
+            }
+        }
+        None => timeout(Duration::from_secs(timeout_secs), cmd.output()).await,
+    };
 
     match output_result {
         Ok(Ok(output)) => {

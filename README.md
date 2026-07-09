@@ -46,6 +46,8 @@ $ rg --files -t rust  [safe]
 
 REPL: `›` prompt · `:q` · `:reset` · `:config` · `/mito` · `/self-harness <validator>` · line ending `\` continues.
 
+**Cancel:** press **Esc** (or Ctrl+C) while the spinner shows `thinking · esc cancel`, or while a long shell command runs. Approval prompt still uses Esc to cancel the turn.
+
 ## Other models
 
 ```sh
