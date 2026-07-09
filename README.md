@@ -34,7 +34,7 @@ Approval for each command:
 ```
 # list rust sources
 $ rg --files -t rust  [safe]
-  [y]  [a]all  [s]safe  [n]  [esc] ·
+  [y]  [a]all  [s]safe  [n]  [esc]
 ```
 
 | Key | Meaning |
@@ -83,16 +83,6 @@ Or `~/.config/nano/config.json` / `./nano_config.json` (local overlays global). 
 3. **Short system prompt.** Procedures the model can follow, not a novel.
 4. **Session resume that fails loud.** Format mismatch → start fresh, don't half-context.
 5. **Sandbox with a name.** `fs` vs `fs+net` vs `off` — isolation is a policy, not a mystery.
-
-See [ROADMAP.md](ROADMAP.md) and [changelog.md](changelog.md).
-
-## Dev
-
-```sh
-cargo test
-cargo test --features acp
-cargo clippy --all-targets --all-features -- -D warnings
-```
 
 ## Arch
 
