@@ -7,11 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::env;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static SESSIONS_PATH: OnceLock<PathBuf> = OnceLock::new();
 const MAX_SESSIONS: usize = 50;
+// ponytail: hard cap messages body so resume stays usable; upgrade = per-message tool trim
+const MAX_SESSION_MESSAGES: usize = 200;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Session {
@@ -140,9 +142,35 @@ pub fn save_session(
         sessions = sessions[sessions.len() - MAX_SESSIONS..].to_vec();
     }
 
-    if let Ok(data) = serde_json::to_string_pretty(&sessions) {
-        let _ = std::fs::write(sessions_path(), data);
+    // Cap message trails so one chat path can't balloon ~/.nano_sessions.json.
+    for session in &mut sessions {
+        if let Some(messages) = session.messages.as_mut()
+            && messages.len() > MAX_SESSION_MESSAGES
+        {
+            let drop = messages.len() - MAX_SESSION_MESSAGES;
+            messages.drain(0..drop);
+        }
     }
+
+    if let Ok(data) = serde_json::to_string_pretty(&sessions) {
+        let _ = atomic_write(sessions_path(), data.as_bytes());
+    }
+}
+
+/// Write via temp+rename so a crash mid-write can't leave a half JSON array.
+fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("nano_sessions"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 pub fn pick_session() -> Option<Session> {
@@ -222,5 +250,19 @@ mod tests {
             messages: None,
         };
         assert_eq!(session.resolved_format(), ApiFormat::ChatCompletions);
+    }
+
+    #[test]
+    fn caps_session_messages_to_max() {
+        use super::MAX_SESSION_MESSAGES;
+        let mut messages = (0..(MAX_SESSION_MESSAGES + 25))
+            .map(|i| serde_json::json!({"role": "user", "content": i.to_string()}))
+            .collect::<Vec<_>>();
+        if messages.len() > MAX_SESSION_MESSAGES {
+            let drop = messages.len() - MAX_SESSION_MESSAGES;
+            messages.drain(0..drop);
+        }
+        assert_eq!(messages.len(), MAX_SESSION_MESSAGES);
+        assert_eq!(messages[0]["content"], "25");
     }
 }

@@ -168,9 +168,23 @@ async fn ask_model(client: &Client, system: &str, prompt_text: &str) -> Result<S
 
     let http = req.json(&body).send().await.map_err(|e| e.to_string())?;
     let status = http.status();
-    let response: Value = http.json().await.map_err(|e| e.to_string())?;
+    let raw = http.text().await.map_err(|e| e.to_string())?;
+    let preview = truncate_tail(&raw, 500);
+    let response: Value = match serde_json::from_str(&raw) {
+        Ok(response) => response,
+        Err(_) if status.is_success() => {
+            return Err(format!("invalid JSON response: {preview}"));
+        }
+        Err(_) => return Err(format!("API Error: {status} {preview}")),
+    };
     if !status.is_success() {
         return Err(format!("API Error: {status} {response}"));
+    }
+    if response.get("error").is_some()
+        && response.get("choices").is_none()
+        && response.get("output").is_none()
+    {
+        return Err(format!("API Error: {response}"));
     }
 
     let text = match target.format {

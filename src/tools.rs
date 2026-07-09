@@ -270,9 +270,32 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
     approval_from_line(&choice)
 }
 
+fn merge_shell_env(overrides: Option<&serde_json::Map<String, serde_json::Value>>) -> Vec<(String, String)> {
+    let mut env_map: std::collections::HashMap<String, String> = env::vars().collect();
+    if let Some(overrides) = overrides {
+        for (k, v) in overrides {
+            if let Some(val) = v.as_str() {
+                env_map.insert(k.clone(), val.to_string());
+            }
+        }
+    }
+    env_map.into_iter().collect()
+}
+
+fn shell_timeout_secs(args: &serde_json::Value) -> u64 {
+    // ponytail: floor at 1 — Duration::from_secs(0) races the future immediately
+    args.get("timeout")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(60)
+        .max(1)
+}
+
 async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bool)) -> String {
     let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
-    let timeout_secs = args.get("timeout").and_then(|t| t.as_u64()).unwrap_or(60);
+    if command.trim().is_empty() {
+        return "bad arguments: command is required".to_string();
+    }
+    let timeout_secs = shell_timeout_secs(args);
     let env_vars = args.get("env").and_then(|e| e.as_object());
 
     let (run_cwd, writable_root, force_sandbox) = prepared;
@@ -290,16 +313,7 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
 
     let mut cmd = sandbox.wrap_command(&merged_command);
     cmd.current_dir(&run_cwd);
-
-    let mut current_env: Vec<(String, String)> = env::vars().collect();
-    if let Some(env_map) = env_vars {
-        for (k, v) in env_map {
-            if let Some(val) = v.as_str() {
-                current_env.push((k.clone(), val.to_string()));
-            }
-        }
-    }
-    cmd.envs(current_env);
+    cmd.envs(merge_shell_env(env_vars));
 
     cmd.stdout(std::process::Stdio::piped());
     // ponytail: kill_on_drop so timeout abort reaps the child; futures cancel otherwise leaks it
@@ -337,6 +351,13 @@ async fn execute_shell_tool(args: &serde_json::Value) -> Result<String, ToolCanc
         .unwrap_or("");
     if desc.trim().is_empty() {
         return Ok("bad arguments: description is required".to_string());
+    }
+    if args
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_none_or(|c| c.trim().is_empty())
+    {
+        return Ok("bad arguments: command is required".to_string());
     }
     let prepared = match prepare_shell_execution(args) {
         Ok(prepared) => prepared,
@@ -476,7 +497,9 @@ pub async fn dispatch_tool_call(name: &str, args_str: &str) -> Result<String, To
 
 #[cfg(test)]
 mod tests {
-    use super::{Approval, LineKey, approval_from_key, approval_from_line};
+    use super::{
+        Approval, LineKey, approval_from_key, approval_from_line, merge_shell_env, shell_timeout_secs,
+    };
 
     #[test]
     fn approval_choices_include_cancel() {
@@ -490,5 +513,25 @@ mod tests {
             approval_from_key(LineKey::Char('Y')),
             Some(Approval::Approve)
         );
+    }
+
+    #[test]
+    fn shell_timeout_floors_at_one_second() {
+        assert_eq!(shell_timeout_secs(&serde_json::json!({})), 60);
+        assert_eq!(shell_timeout_secs(&serde_json::json!({"timeout": 0})), 1);
+        assert_eq!(shell_timeout_secs(&serde_json::json!({"timeout": 5})), 5);
+    }
+
+    #[test]
+    fn merge_shell_env_overrides_existing_keys() {
+        // Isolate from the ambient process env: insert PATH override and that path wins.
+        let overrides = serde_json::json!({"PATH": "/nano-override-path"});
+        let map = overrides.as_object().unwrap();
+        let merged = merge_shell_env(Some(map));
+        let path = merged
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(path, Some("/nano-override-path"));
     }
 }

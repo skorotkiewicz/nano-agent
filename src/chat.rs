@@ -38,13 +38,40 @@ impl From<ToolCancelled> for TurnCancelled {
     }
 }
 
-/// Reject non-2xx JSON bodies so a 401/429 doesn't look like an empty model reply.
-fn parse_api_json(status: reqwest::StatusCode, body: serde_json::Value) -> Result<serde_json::Value, String> {
-    if status.is_success() {
-        Ok(body)
-    } else {
-        Err(format!("{status} {body}"))
+/// Reject non-2xx / error-shaped bodies so a 401/429/proxy HTML page doesn't
+/// look like an empty model reply.
+fn parse_api_body(status: reqwest::StatusCode, raw: &str) -> Result<serde_json::Value, String> {
+    let body: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(body) => body,
+        Err(_) if status.is_success() => {
+            return Err(format!("invalid JSON response: {}", truncate_for_error(raw)));
+        }
+        Err(_) => {
+            return Err(format!("{status} {}", truncate_for_error(raw)));
+        }
+    };
+
+    if !status.is_success() {
+        return Err(format!("{status} {body}"));
     }
+    // Some OpenAI-compat proxies return HTTP 200 with {"error": ...}.
+    if body.get("error").is_some() && body.get("choices").is_none() && body.get("output").is_none()
+    {
+        return Err(format!("{body}"));
+    }
+    Ok(body)
+}
+
+fn truncate_for_error(text: &str) -> String {
+    const MAX: usize = 500;
+    if text.len() <= MAX {
+        return text.to_string();
+    }
+    let mut end = MAX;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 async fn respond_api(
@@ -87,8 +114,8 @@ async fn respond_api(
     let res = async {
         let http = req.json(&body).send().await.map_err(|e| e.to_string())?;
         let status = http.status();
-        let body = http.json().await.map_err(|e| e.to_string())?;
-        parse_api_json(status, body)
+        let raw = http.text().await.map_err(|e| e.to_string())?;
+        parse_api_body(status, &raw)
     }
     .await;
 
@@ -198,19 +225,22 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
     let payload = serde_json::json!([{"type": "message", "role": "user", "content": prompt}]);
     let mut messages = vec![serde_json::json!({"role": "user", "content": prompt})];
 
+    // Keep the last known Responses id on failure so mid-turn API errors don't
+    // wipe previous_response_id and break -c/-s resume.
+    let mut prev_id = previous.map(String::from);
+
     let mut response = match respond_responses(client, payload, previous).await {
         Ok(r) => r,
         Err(e) => {
             let err = format!("API Error: {}", e);
             messages.push(serde_json::json!({"role": "assistant", "content": err}));
-            return Ok((err, None, Some(messages)));
+            return Ok((err, prev_id, Some(messages)));
         }
     };
 
-    let mut prev_id = response
-        .get("id")
-        .and_then(|i| i.as_str())
-        .map(String::from);
+    if let Some(id) = response.get("id").and_then(|i| i.as_str()) {
+        prev_id = Some(id.to_string());
+    }
 
     for _ in 0..get_max_steps() {
         let calls: Vec<&serde_json::Value> = response
@@ -264,13 +294,12 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
             Err(e) => {
                 let err = format!("API Error: {}", e);
                 messages.push(serde_json::json!({"role": "assistant", "content": err}));
-                return Ok((err, None, Some(messages)));
+                return Ok((err, prev_id, Some(messages)));
             }
         };
-        prev_id = response
-            .get("id")
-            .and_then(|i| i.as_str())
-            .map(String::from);
+        if let Some(id) = response.get("id").and_then(|i| i.as_str()) {
+            prev_id = Some(id.to_string());
+        }
     }
 
     let stopped = "stopped: too many tool calls".to_string();
@@ -435,7 +464,7 @@ pub async fn run_chat_with_system(
 
 #[cfg(test)]
 mod tests {
-    use super::{TurnCancelled, ensure_system_message, parse_api_json};
+    use super::{TurnCancelled, ensure_system_message, parse_api_body};
     use crate::tools::ToolCancelled;
 
     #[test]
@@ -446,15 +475,26 @@ mod tests {
 
     #[test]
     fn api_error_status_is_rejected() {
-        let err = parse_api_json(
+        let err = parse_api_body(
             reqwest::StatusCode::UNAUTHORIZED,
-            serde_json::json!({"error": {"message": "bad key"}}),
+            r#"{"error": {"message": "bad key"}}"#,
         )
         .unwrap_err();
         assert!(err.contains("401"));
         assert!(err.contains("bad key"));
 
-        assert!(parse_api_json(reqwest::StatusCode::OK, serde_json::json!({"ok": true})).is_ok());
+        assert!(parse_api_body(reqwest::StatusCode::OK, r#"{"ok": true}"#).is_ok());
+
+        let html = parse_api_body(reqwest::StatusCode::BAD_GATEWAY, "<html>bad gateway</html>")
+            .unwrap_err();
+        assert!(html.contains("502"));
+
+        let soft = parse_api_body(
+            reqwest::StatusCode::OK,
+            r#"{"error": {"message": "quota"}}"#,
+        )
+        .unwrap_err();
+        assert!(soft.contains("quota"));
     }
 
     #[test]

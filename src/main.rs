@@ -21,9 +21,19 @@ use serde_json::Value;
 use session::{Session, SessionState, pick_session, sessions_in_cwd};
 use state::{color, get_config, get_mcp_client};
 use std::env;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use turn::run_state_turn;
+
+fn http_client() -> Client {
+    // ponytail: finite timeouts beat hanging forever on a dead endpoint
+    Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(300))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+}
 
 async fn route_prompt(
     client: &Client,
@@ -51,7 +61,7 @@ async fn run_acp_server() -> Result<(), String> {
         get_mcp_client().load_servers(get_config()).await;
     }
 
-    let client = Client::new();
+    let client = http_client();
     let server = AcpServer::new(
         "nano",
         "Nano local shell agent",
@@ -180,7 +190,7 @@ async fn main() {
 
     get_mcp_client().load_servers(get_config()).await;
 
-    let client = Client::new();
+    let client = http_client();
 
     let mut flag = None;
     if !args.is_empty() && (args[0] == "-c" || args[0] == "-s") {
