@@ -181,8 +181,18 @@ enum Approval {
     Cancel,
 }
 
-fn approval_from_line(choice: &str) -> Approval {
+/// Enter (empty line) accepts this: safe → [s], write → [y], danger → refuse (must type y).
+fn default_approval(risk: &str) -> Approval {
+    match risk {
+        "safe" => Approval::ApproveSafe,
+        "write" => Approval::Approve,
+        _ => Approval::Deny,
+    }
+}
+
+fn approval_from_line(choice: &str, risk: &str) -> Approval {
     match choice.trim().to_ascii_lowercase().as_str() {
+        "" => default_approval(risk), // bare Enter / empty line
         "a" | "all" => Approval::ApproveAll,
         "s" | "safe" => Approval::ApproveSafe,
         "y" | "yes" => Approval::Approve,
@@ -191,12 +201,13 @@ fn approval_from_line(choice: &str) -> Approval {
     }
 }
 
-fn approval_from_key(key: LineKey) -> Option<Approval> {
+fn approval_from_key(key: LineKey, risk: &str) -> Option<Approval> {
     match key {
+        LineKey::Enter => Some(default_approval(risk)),
         LineKey::Char('a') | LineKey::Char('A') => Some(Approval::ApproveAll),
         LineKey::Char('s') | LineKey::Char('S') => Some(Approval::ApproveSafe),
         LineKey::Char('y') | LineKey::Char('Y') => Some(Approval::Approve),
-        LineKey::Char('n') | LineKey::Char('N') | LineKey::Enter => Some(Approval::Deny),
+        LineKey::Char('n') | LineKey::Char('N') => Some(Approval::Deny),
         LineKey::Escape => Some(Approval::Cancel),
         _ => None,
     }
@@ -340,11 +351,11 @@ fn safe_subcommand(base: &str, line: &str) -> bool {
     }
 }
 
-fn read_tty_approval() -> io::Result<Approval> {
+fn read_tty_approval(risk: &str) -> io::Result<Approval> {
     let _raw = RawTerminal::enter()?;
     let mut stdin = io::stdin().lock();
     loop {
-        if let Some(approval) = approval_from_key(read_line_key(&mut stdin)?) {
+        if let Some(approval) = approval_from_key(read_line_key(&mut stdin)?, risk) {
             eprintln!();
             return Ok(approval);
         }
@@ -394,17 +405,16 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         .get("description")
         .and_then(|d| d.as_str())
         .unwrap_or("");
-    let (risk_color, risk_label) = command_risk_label(command);
+    let (_risk_color, risk_label) = command_risk_label(command);
 
     eprintln!();
     if !description.is_empty() {
         eprintln!("{}", color("90", &format!("# {description}")));
     }
     eprintln!(
-        "{} {} {}",
-        color("31", &format!("$ ")),
-        color("90", &format!("{command}")),
-        color(risk_color, &format!("[{risk_label}]"))
+        "{} {}",
+        color("31", "$"),
+        color("90", command) // color(risk_color, &format!("[{risk_label}]"))
     );
 
     for key in &["cwd", "timeout", "env"] {
@@ -429,25 +439,32 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         return Approval::Approve;
     }
 
+    // Highlight Enter-default: safe → [s], write → [y], danger → no auto (safe refuse)
+    let enter_hint = match risk_label {
+        "safe" => color("36", "↵=[s]"),
+        "write" => color("32", "↵=[y]"),
+        _ => color("90", "↵ no (type y)"),
+    };
     eprint!(
-        "  {}  {}  {}  {}  {} · ",
+        "  {}  {}  {}  {}  {}  {} · ",
         color("32", "[y]"),
         color("33", "[a]all"),
         color("36", "[s]safe"),
         color("31", "[n]"),
-        color("90", "[esc]")
+        color("90", "[esc]"),
+        enter_hint
     );
     let _ = io::stderr().flush();
 
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
-        return read_tty_approval().unwrap_or(Approval::Deny);
+        return read_tty_approval(risk_label).unwrap_or(Approval::Deny);
     }
 
     let mut choice = String::new();
     if io::stdin().read_line(&mut choice).is_err() {
         return Approval::Deny;
     }
-    approval_from_line(&choice)
+    approval_from_line(&choice, risk_label)
 }
 
 fn merge_shell_env(
@@ -726,21 +743,43 @@ mod tests {
 
     #[test]
     fn approval_choices_include_cancel() {
-        assert_eq!(approval_from_line("yes"), Approval::Approve);
-        assert_eq!(approval_from_line("all"), Approval::ApproveAll);
-        assert_eq!(approval_from_line("safe"), Approval::ApproveSafe);
-        assert_eq!(approval_from_line("cancel"), Approval::Cancel);
-        assert_eq!(approval_from_line("nope"), Approval::Deny);
+        assert_eq!(approval_from_line("yes", "write"), Approval::Approve);
+        assert_eq!(approval_from_line("all", "write"), Approval::ApproveAll);
+        assert_eq!(approval_from_line("safe", "write"), Approval::ApproveSafe);
+        assert_eq!(approval_from_line("cancel", "write"), Approval::Cancel);
+        assert_eq!(approval_from_line("nope", "write"), Approval::Deny);
 
-        assert_eq!(approval_from_key(LineKey::Escape), Some(Approval::Cancel));
         assert_eq!(
-            approval_from_key(LineKey::Char('Y')),
+            approval_from_key(LineKey::Escape, "safe"),
+            Some(Approval::Cancel)
+        );
+        assert_eq!(
+            approval_from_key(LineKey::Char('Y'), "safe"),
             Some(Approval::Approve)
         );
         assert_eq!(
-            approval_from_key(LineKey::Char('s')),
+            approval_from_key(LineKey::Char('s'), "write"),
             Some(Approval::ApproveSafe)
         );
+    }
+
+    #[test]
+    fn enter_accepts_risk_suggestion() {
+        assert_eq!(
+            approval_from_key(LineKey::Enter, "safe"),
+            Some(Approval::ApproveSafe)
+        );
+        assert_eq!(
+            approval_from_key(LineKey::Enter, "write"),
+            Some(Approval::Approve)
+        );
+        assert_eq!(
+            approval_from_key(LineKey::Enter, "danger"),
+            Some(Approval::Deny)
+        );
+        assert_eq!(approval_from_line("", "safe"), Approval::ApproveSafe);
+        assert_eq!(approval_from_line("", "write"), Approval::Approve);
+        assert_eq!(approval_from_line("", "danger"), Approval::Deny);
     }
 
     #[test]

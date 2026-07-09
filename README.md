@@ -39,6 +39,7 @@ $ rg --files -t rust  [safe]
 
 | Key | Meaning |
 |-----|---------|
+| **Enter** | accept the **suggestion** from the risk tag: `[safe]` → `s`, `[write]` → `y`; `[danger]` will **not** run (type `y` explicitly) |
 | `y` | run this once |
 | `a` | run **all** remaining this turn |
 | `s` | run this + auto-ok **safe** patterns (`ls`, `git status`, `cargo test`, `rg`, …) |
