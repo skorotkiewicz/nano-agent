@@ -465,7 +465,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(tool_names, vec!["search".to_string()]);
         assert!(client.servers.lock().await.is_empty());
-        assert!(client.refresh_needed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            client
+                .refresh_needed
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
 
         let _ = std::fs::remove_file(PathBuf::from(&client.cache_path));
     }

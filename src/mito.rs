@@ -21,8 +21,7 @@ pub fn strip_mito_prefix(prompt: &str) -> Option<&str> {
 
 fn extract_mito_handoff(answer: &str) -> Option<String> {
     const PREFIX: &str = "MITO_SEND:";
-    let index = answer.find(PREFIX)?;
-    let handoff = answer[index + PREFIX.len()..].trim();
+    let handoff = answer.trim_start().strip_prefix(PREFIX)?.trim();
     if handoff.is_empty() {
         None
     } else {
@@ -106,7 +105,15 @@ mod tests {
             extract_mito_handoff("MITO_SEND: implement the feature").as_deref(),
             Some("implement the feature")
         );
+        assert_eq!(
+            extract_mito_handoff("\n  MITO_SEND: implement the feature").as_deref(),
+            Some("implement the feature")
+        );
         assert_eq!(extract_mito_handoff("MITO_SEND:   "), None);
+        assert_eq!(
+            extract_mito_handoff("first ask a question\nMITO_SEND: implement the feature"),
+            None
+        );
         assert_eq!(extract_mito_handoff("ask a question first"), None);
     }
 }

@@ -152,7 +152,7 @@ fn text(response: &serde_json::Value) -> String {
 
 async fn tool_output_responses(
     call: &serde_json::Value,
-) -> Result<serde_json::Value, ToolCancelled> {
+) -> Result<(serde_json::Value, serde_json::Value), ToolCancelled> {
     let call_id = call
         .get("call_id")
         .and_then(|c| c.as_str())
@@ -165,11 +165,18 @@ async fn tool_output_responses(
         .unwrap_or("{}");
     let result = dispatch_tool_call(name, args_str).await?;
 
-    Ok(serde_json::json!({
-        "type": "function_call_output",
-        "call_id": call_id,
-        "output": result
-    }))
+    Ok((
+        serde_json::json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": result
+        }),
+        serde_json::json!({
+            "role": "tool",
+            "name": name,
+            "content": result
+        }),
+    ))
 }
 
 pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>) -> TurnOutcome {
@@ -209,6 +216,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
 
         let mut outputs = Vec::new();
         let mut tool_names: Vec<&str> = Vec::new();
+        let mut tool_messages = Vec::new();
         for call in &calls {
             let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
             let args = call
@@ -217,7 +225,9 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
                 .unwrap_or("{}");
             log_tool_call(name, args);
             tool_names.push(name);
-            outputs.push(tool_output_responses(call).await?);
+            let (output, message) = tool_output_responses(call).await?;
+            outputs.push(output);
+            tool_messages.push(message);
         }
         messages.push(serde_json::json!({
             "role": "assistant",
@@ -226,6 +236,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
                 .map(|n| serde_json::json!({"function": {"name": n}}))
                 .collect::<Vec<_>>()
         }));
+        messages.extend(tool_messages);
 
         response = match respond_responses(
             client,

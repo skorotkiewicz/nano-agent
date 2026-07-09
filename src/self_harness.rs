@@ -270,7 +270,16 @@ fn summarize_messages(out: &mut String, messages: &[Value]) {
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        let mut line = format!("{role}: ");
+        let role_label = if role == "tool" {
+            message
+                .get("name")
+                .and_then(Value::as_str)
+                .map(|name| format!("tool({name})"))
+                .unwrap_or_else(|| role.to_string())
+        } else {
+            role.to_string()
+        };
+        let mut line = format!("{role_label}: ");
         if let Some(content) = message.get("content").and_then(Value::as_str) {
             line.push_str(content);
         } else if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
@@ -454,5 +463,20 @@ mod tests {
     #[test]
     fn truncates_on_utf8_boundary() {
         assert_eq!(truncate_tail("aébc", 4), "ébc");
+    }
+
+    #[test]
+    fn summarize_messages_includes_tool_name() {
+        let mut out = String::new();
+        summarize_messages(
+            &mut out,
+            &[serde_json::json!({
+                "role": "tool",
+                "name": "execute_shell",
+                "content": "ls output"
+            })],
+        );
+
+        assert!(out.contains("tool(execute_shell): ls output"));
     }
 }

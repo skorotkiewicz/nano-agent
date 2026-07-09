@@ -88,6 +88,15 @@ fn custom_provider_target(provider_name: &str, model: Option<String>) -> Option<
     })
 }
 
+fn ensure_mito_target(provider_name: &str, target: ApiTarget) -> Result<ApiTarget, String> {
+    if target.format != ApiFormat::ChatCompletions {
+        return Err(format!(
+            "mito-mode.provider '{provider_name}' must use chat completions; responses providers are not supported"
+        ));
+    }
+    Ok(target)
+}
+
 pub fn get_api_target() -> ApiTarget {
     if let Some(provider_name) = get_config().get_provider()
         && let Some(target) = custom_provider_target(provider_name, None)
@@ -124,13 +133,17 @@ pub fn get_mito_target() -> Result<ApiTarget, String> {
         .as_deref()
         .ok_or_else(|| "mito-mode.provider is not configured".to_string())?;
     let model = mito.model.clone();
-    custom_provider_target(provider, model)
-        .ok_or_else(|| format!("mito-mode.provider '{provider}' is not in custom_providers"))
+    let target = custom_provider_target(provider, model)
+        .ok_or_else(|| format!("mito-mode.provider '{provider}' is not in custom_providers"))?;
+    ensure_mito_target(provider, target)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ApiFormat, apply_generation_controls, custom_provider_endpoint, resolve_api_key};
+    use super::{
+        ApiFormat, ApiTarget, apply_generation_controls, custom_provider_endpoint,
+        ensure_mito_target, resolve_api_key,
+    };
 
     #[test]
     fn responses_use_max_output_tokens() {
@@ -167,5 +180,18 @@ mod tests {
         let (format, url) = custom_provider_endpoint("responses", "http://localhost:1234/v1");
         assert_eq!(format, ApiFormat::Responses);
         assert_eq!(url, "http://localhost:1234/v1/responses");
+    }
+
+    #[test]
+    fn mito_target_rejects_responses_format() {
+        let target = ApiTarget {
+            url: "http://localhost:1234/v1/responses".to_string(),
+            format: ApiFormat::Responses,
+            api_key: String::new(),
+            model: "gpt-test".to_string(),
+        };
+
+        let error = ensure_mito_target("local", target).unwrap_err();
+        assert!(error.contains("responses providers are not supported"));
     }
 }
