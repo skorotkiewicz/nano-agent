@@ -6,7 +6,7 @@ use crate::provider::ApiFormat;
 #[cfg(feature = "acp")]
 use crate::provider::get_api_target;
 use crate::session::{SessionState, append_session_messages, save_session};
-use crate::state::color;
+// use crate::state::color;
 use reqwest::Client;
 
 pub async fn run_state_turn(
@@ -35,10 +35,10 @@ pub async fn run_state_turn(
 
     let (answer, prev_id, new_messages) = match result {
         Ok(values) => values,
-        Err(cancelled) => {
-            if cancelled.should_report() {
-                eprintln!("{}", color("90", "cancelled (esc)"));
-            }
+        Err(_cancelled) => {
+            // if cancelled.should_report() {
+            //     eprintln!("{}", color("90", "cancelled (esc)"));
+            // }
             return String::new();
         }
     };
@@ -86,10 +86,10 @@ pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
     };
     match result {
         Ok((answer, _, _)) => answer,
-        Err(cancelled) => {
-            if cancelled.should_report() {
-                eprintln!("{}", color("90", "cancelled (esc)"));
-            }
+        Err(_cancelled) => {
+            // if cancelled.should_report() {
+            //     eprintln!("{}", color("90", "cancelled (esc)"));
+            // }
             String::new()
         }
     }

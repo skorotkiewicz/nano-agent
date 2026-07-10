@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- Approval prompts show the documented `[safe]`, `[write]`, or `[danger]` risk tag again.
+- Approval prompts now show non-default `cwd`/`timeout`/`env`, so write/delete commands are easier to judge.
+- Secret-looking env values in approval prompts are redacted.
+- Source-editing commands like `cargo fmt`, `rustfmt file`, `sed -i`, and `awk -i` are no longer tagged `[safe]`.
+- Deletion commands like `rm`, `unlink`, `rmdir`, `git rm`, `find -delete`, `find -exec rm`, and `xargs rm` are now tagged `[danger]`, including common `sudo` wrappers.
+- Data-destroying commands like `dd of=...`, `rsync --delete`, and `shred` are now tagged `[danger]`.
+- Git discard/delete commands like `git restore`, `git checkout --`, `git clean`, `git stash drop`, and `git branch -D` are now tagged `[danger]`, including common `sudo` / `git -C` forms.
+- `[danger]` commands now always require explicit `y`; `a`/`s` shortcuts no longer approve them.
+- ACP shell calls refuse `[danger]` commands by default unless `NANO_ACP_ALLOW_DANGER=1` is set.
+- Default `fs` sandbox failures that look network-related now suggest `NANO_SANDBOX=fs+net`.
+- The system prompt now explicitly tells Nano to inspect git status before edits/deletes and preserve user changes.
+- The REPL MCP banner now distinguishes cached tools from live connected servers.
+- `--show-config` now lists configured MCP server and ACP agent names, not just counts.
+
 ## 0.4.0
 
 - **Bang shell shortcuts** in REPL / one-shot:

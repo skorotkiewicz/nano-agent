@@ -41,6 +41,7 @@ pub enum TurnCancelled {
 }
 
 impl TurnCancelled {
+    #[allow(dead_code)]
     pub fn should_report(self) -> bool {
         // Always show a quiet line for user cancel (esc during think / tool cancel).
         matches!(self, Self::User)
@@ -181,6 +182,7 @@ async fn respond_api(
     res
 }
 
+#[allow(dead_code)]
 fn log_tool_call(name: &str, args: &str) {
     if is_tty() {
         eprintln!(
@@ -342,7 +344,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
                 .get("arguments")
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
-            log_tool_call(name, args);
+            // log_tool_call(name, args);
             tool_invocations.push((name, args));
             let (output, message) = tool_output_responses(call).await?;
             outputs.push(output);
@@ -562,7 +564,7 @@ pub async fn run_chat_with_system(
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
 
-            log_tool_call(name, args_str);
+            // log_tool_call(name, args_str);
 
             let output = tool_output_chat(name, args_str, call_id).await?;
             messages.push(output);

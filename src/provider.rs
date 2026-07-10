@@ -3,6 +3,7 @@
 use crate::state::{get_config, get_model};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,13 +108,23 @@ pub fn print_effective_config() {
         println!("temperature:  {temp}");
     }
     println!("NANO_SANDBOX: {sandbox}");
-    println!("mcp_servers:  {}", config.mcp_servers.len());
-    println!("acp_agents:   {}", config.acp_agents.len());
+    println!("mcp_servers:  {}", named_count(&config.mcp_servers));
+    println!("acp_agents:   {}", named_count(&config.acp_agents));
     let mito = config.get_mito_mode();
     println!(
         "mito-mode:    enabled={} provider={:?} model={:?}",
         mito.enabled, mito.provider, mito.model
     );
+}
+
+fn named_count<T>(items: &HashMap<String, T>) -> String {
+    let mut names = items.keys().map(String::as_str).collect::<Vec<_>>();
+    names.sort_unstable();
+    if names.is_empty() {
+        "0".to_string()
+    } else {
+        format!("{} ({})", names.len(), names.join(", "))
+    }
 }
 
 fn resolve_api_key(configured: Option<String>, fallback: String) -> String {
@@ -194,8 +205,9 @@ pub fn get_mito_target() -> Result<ApiTarget, String> {
 mod tests {
     use super::{
         ApiFormat, ApiTarget, apply_generation_controls, custom_provider_endpoint,
-        ensure_mito_target, looks_local_endpoint, resolve_api_key,
+        ensure_mito_target, looks_local_endpoint, named_count, resolve_api_key,
     };
+    use std::collections::HashMap;
 
     #[test]
     fn responses_use_max_output_tokens() {
@@ -225,6 +237,18 @@ mod tests {
             resolve_api_key(Some(String::new()), "env-key".to_string()),
             ""
         );
+    }
+
+    #[test]
+    fn named_count_lists_sorted_names_when_present() {
+        let empty = HashMap::<String, ()>::new();
+        assert_eq!(named_count(&empty), "0");
+
+        let mut items = HashMap::new();
+        items.insert("web".to_string(), ());
+        items.insert("docs".to_string(), ());
+
+        assert_eq!(named_count(&items), "2 (docs, web)");
     }
 
     #[test]

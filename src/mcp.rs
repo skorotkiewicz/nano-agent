@@ -319,11 +319,19 @@ impl McpClient {
     pub fn status(&self) -> String {
         let connected = self.servers.try_lock().map(|s| s.len()).unwrap_or(0);
         let total = self.total_servers.try_lock().map(|t| *t).unwrap_or(0);
-        if connected == 0 && total > 0 {
-            let cached = self.tools.try_lock().map(|t| t.len()).unwrap_or(0);
-            if cached > 0 {
-                return format!("(mcp: cached {} tools)", cached);
-            }
+        let tools = self.tools.try_lock().map(|t| t.len()).unwrap_or(0);
+        if connected == 0 && total > 0 && tools > 0 && self.refresh_needed.load(Ordering::SeqCst) {
+            return format!(
+                "(mcp: cached {}, {} pending)",
+                count(tools, "tool"),
+                count(total, "server")
+            );
+        }
+        if total > 0 {
+            return format!(
+                "(mcp: {connected}/{total} servers, {})",
+                count(tools, "tool")
+            );
         }
         format!("(mcp: {}/{}) servers", connected, total)
     }
@@ -438,6 +446,14 @@ fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(String, String)> {
         .collect::<Vec<_>>();
     pairs.sort_by(|left, right| left.0.cmp(&right.0));
     pairs
+}
+
+fn count(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
 }
 
 fn mcp_cache_fingerprint(config: &Config) -> String {
@@ -673,6 +689,7 @@ mod tests {
                 .refresh_needed
                 .load(std::sync::atomic::Ordering::SeqCst)
         );
+        assert_eq!(client.status(), "(mcp: cached 1 tool, 1 server pending)");
 
         let _ = std::fs::remove_file(PathBuf::from(&client.cache_path));
     }

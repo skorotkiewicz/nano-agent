@@ -13,7 +13,6 @@ Everything that used to be open is checked. See `changelog.md`.
 Optional only if real pain shows up:
 
 - Tunable `is_safe_command` allowlist from usage complaints
-- Suggest `fs+net` when models keep hitting network denials
 - Per-server MCP log UI
 
 ## Frozen public surface

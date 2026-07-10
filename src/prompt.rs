@@ -175,6 +175,7 @@ fn build_system(cwd: &Path) -> String {
          - Primary tool: execute_shell. For any inspect/edit/run/test/search, call it — do not invent results.\n\
          - description: 5–10 words of why, not a second command.\n\
          - Prefer small read steps first, then change only what the user asked for.\n\
+         - Before editing/deleting in a git repo, inspect git status and preserve user changes.\n\
          - Never destroy data (rm -rf, reset --hard, push --force, drop tables) unless the user explicitly asked.\n\
          - Keep going until the task is done or blocked by deny/error; then stop and say what is left.\n\
          - Answer in short plain terminal text. No markdown chrome, no songs, no filler.{delegation}{acp_restriction}\n\
@@ -208,6 +209,7 @@ mod tests {
         let system = build_system(&dir);
         assert!(system.contains("Local harness"));
         assert!(system.contains("Verify required files before final answer."));
+        assert!(system.contains("inspect git status and preserve user changes"));
         assert!(system.contains("You are Nano"));
 
         let _ = fs::remove_dir_all(dir);

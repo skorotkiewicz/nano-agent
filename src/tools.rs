@@ -22,6 +22,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, timeout};
 
+const NANO_ACP_ALLOW_DANGER_ENV: &str = "NANO_ACP_ALLOW_DANGER";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCancelled {
     User,
@@ -178,6 +180,7 @@ enum Approval {
     /// Auto-approve subsequent read-only-looking commands this turn.
     ApproveSafe,
     Deny,
+    DenyAcpDanger,
     Cancel,
 }
 
@@ -193,8 +196,8 @@ fn default_approval(risk: &str) -> Approval {
 fn approval_from_line(choice: &str, risk: &str) -> Approval {
     match choice.trim().to_ascii_lowercase().as_str() {
         "" => default_approval(risk), // bare Enter / empty line
-        "a" | "all" => Approval::ApproveAll,
-        "s" | "safe" => Approval::ApproveSafe,
+        "a" | "all" if risk != "danger" => Approval::ApproveAll,
+        "s" | "safe" if risk != "danger" => Approval::ApproveSafe,
         "y" | "yes" => Approval::Approve,
         "esc" | "escape" | "cancel" => Approval::Cancel,
         _ => Approval::Deny,
@@ -204,13 +207,32 @@ fn approval_from_line(choice: &str, risk: &str) -> Approval {
 fn approval_from_key(key: LineKey, risk: &str) -> Option<Approval> {
     match key {
         LineKey::Enter => Some(default_approval(risk)),
-        LineKey::Char('a') | LineKey::Char('A') => Some(Approval::ApproveAll),
-        LineKey::Char('s') | LineKey::Char('S') => Some(Approval::ApproveSafe),
+        LineKey::Char('a') | LineKey::Char('A') if risk != "danger" => Some(Approval::ApproveAll),
+        LineKey::Char('a') | LineKey::Char('A') => Some(Approval::Deny),
+        LineKey::Char('s') | LineKey::Char('S') if risk != "danger" => Some(Approval::ApproveSafe),
+        LineKey::Char('s') | LineKey::Char('S') => Some(Approval::Deny),
         LineKey::Char('y') | LineKey::Char('Y') => Some(Approval::Approve),
         LineKey::Char('n') | LineKey::Char('N') => Some(Approval::Deny),
         LineKey::Escape => Some(Approval::Cancel),
         _ => None,
     }
+}
+
+fn approve_all_applies(risk: &str) -> bool {
+    risk != "danger"
+}
+
+fn approve_safe_applies(risk: &str) -> bool {
+    risk == "safe"
+}
+
+fn acp_allows_risk(risk: &str) -> bool {
+    let value = env::var(NANO_ACP_ALLOW_DANGER_ENV).ok();
+    acp_allows_risk_with_value(risk, value.as_deref())
+}
+
+fn acp_allows_risk_with_value(risk: &str, value: Option<&str>) -> bool {
+    risk != "danger" || value.is_some_and(|value| !crate::state::env_flag_is_false(value))
 }
 
 /// Read-only-ish command lines the user can batch-approve with [s] Safe.
@@ -231,10 +253,7 @@ pub fn is_safe_command(command: &str) -> bool {
         return false;
     }
     let first = line.split_whitespace().next().unwrap_or("");
-    let base = std::path::Path::new(first)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(first);
+    let base = command_basename(first);
     matches!(
         base,
         "ls" | "pwd"
@@ -317,29 +336,16 @@ fn safe_subcommand(base: &str, line: &str) -> bool {
                     | "help"
             )
         }),
-        // cargo: read/build/test/check only
-        "cargo" => tokens.get(1).is_some_and(|sub| {
-            matches!(
-                *sub,
-                "test"
-                    | "check"
-                    | "build"
-                    | "clippy"
-                    | "fmt"
-                    | "tree"
-                    | "metadata"
-                    | "search"
-                    | "info"
-                    | "version"
-                    | "--version"
-                    | "help"
-                    | "--help"
-                    | "doc"
-                    | "locate-project"
-                    | "pkgid"
-                    | "verify-project"
-            )
-        }),
+        // cargo: source-writing subcommands need explicit approval unless in check mode.
+        "cargo" => cargo_safe_subcommand(&tokens),
+        "find" => {
+            !tokens.contains(&"-delete")
+                && !tokens.contains(&"-exec")
+                && !tokens.contains(&"-execdir")
+        }
+        "sed" => !tokens.iter().skip(1).any(|token| token.starts_with("-i")),
+        "awk" => !tokens.iter().skip(1).any(|token| *token == "-i"),
+        "rustfmt" => formatter_safe_args(&tokens),
         // interpreters: version / help only (no free-form scripts)
         "python" | "python3" | "node" | "rustc" => tokens.iter().skip(1).all(|t| {
             matches!(
@@ -349,6 +355,26 @@ fn safe_subcommand(base: &str, line: &str) -> bool {
         }),
         _ => true,
     }
+}
+
+fn cargo_safe_subcommand(tokens: &[&str]) -> bool {
+    tokens.get(1).is_some_and(|sub| match *sub {
+        "fmt" => tokens.iter().skip(2).any(|token| *token == "--check"),
+        "clippy" => !tokens.iter().skip(2).any(|token| *token == "--fix"),
+        "test" | "check" | "build" | "tree" | "metadata" | "search" | "info" | "version"
+        | "--version" | "help" | "--help" | "doc" | "locate-project" | "pkgid"
+        | "verify-project" => true,
+        _ => false,
+    })
+}
+
+fn formatter_safe_args(tokens: &[&str]) -> bool {
+    let args = &tokens[1..];
+    !args.is_empty()
+        && (args.contains(&"--check")
+            || args
+                .iter()
+                .all(|token| matches!(*token, "-h" | "--help" | "-V" | "--version")))
 }
 
 fn read_tty_approval(risk: &str) -> io::Result<Approval> {
@@ -365,6 +391,15 @@ fn read_tty_approval(risk: &str) -> io::Result<Approval> {
 fn command_risk_label(command: &str) -> (&'static str, &'static str) {
     // (ansi color, short label)
     let lower = command.to_ascii_lowercase();
+    if looks_like_delete_command(command) {
+        return ("31", "danger");
+    }
+    if looks_like_file_destroy_command(command) {
+        return ("31", "danger");
+    }
+    if looks_like_destructive_git_command(command) {
+        return ("31", "danger");
+    }
     if is_safe_command(command) {
         return ("36", "safe");
     }
@@ -399,6 +434,190 @@ fn command_risk_label(command: &str) -> (&'static str, &'static str) {
     ("33", "write")
 }
 
+fn looks_like_delete_command(command: &str) -> bool {
+    command
+        .split([';', '|', '\n', '\r'])
+        .flat_map(|part| part.split("&&"))
+        .flat_map(|part| part.split("||"))
+        .any(segment_looks_like_delete_command)
+}
+
+fn segment_looks_like_delete_command(segment: &str) -> bool {
+    let tokens = segment.split_whitespace().collect::<Vec<_>>();
+    let tokens = sudo_command_tokens(&tokens);
+    let Some(first) = tokens.first().map(|token| command_basename(token)) else {
+        return false;
+    };
+
+    if matches!(first, "rm" | "unlink" | "rmdir") {
+        return true;
+    }
+    if first == "git"
+        && tokens
+            .get(1)
+            .map(|subcommand| subcommand.eq_ignore_ascii_case("rm"))
+            .unwrap_or(false)
+    {
+        return true;
+    }
+    if first == "find" {
+        return tokens.contains(&"-delete")
+            || tokens
+                .windows(2)
+                .any(|pair| matches!(pair[0], "-exec" | "-execdir") && is_delete_program(pair[1]));
+    }
+    if first == "xargs" {
+        return tokens.iter().skip(1).any(|token| is_delete_program(token));
+    }
+    false
+}
+
+fn is_delete_program(token: &str) -> bool {
+    matches!(command_basename(token), "rm" | "unlink" | "rmdir")
+}
+
+fn looks_like_file_destroy_command(command: &str) -> bool {
+    command
+        .split([';', '|', '\n', '\r'])
+        .flat_map(|part| part.split("&&"))
+        .flat_map(|part| part.split("||"))
+        .any(segment_looks_like_file_destroy_command)
+}
+
+fn segment_looks_like_file_destroy_command(segment: &str) -> bool {
+    let tokens = segment.split_whitespace().collect::<Vec<_>>();
+    let tokens = sudo_command_tokens(&tokens);
+    let Some(first) = tokens.first().map(|token| command_basename(token)) else {
+        return false;
+    };
+
+    match first {
+        "dd" => tokens.iter().skip(1).any(|token| token.starts_with("of=")),
+        "rsync" => tokens
+            .iter()
+            .skip(1)
+            .any(|token| token.starts_with("--delete")),
+        "shred" | "wipe" => true,
+        _ => false,
+    }
+}
+
+fn looks_like_destructive_git_command(command: &str) -> bool {
+    command
+        .split([';', '|', '\n', '\r'])
+        .flat_map(|part| part.split("&&"))
+        .flat_map(|part| part.split("||"))
+        .any(segment_looks_like_destructive_git_command)
+}
+
+fn segment_looks_like_destructive_git_command(segment: &str) -> bool {
+    let tokens = segment.split_whitespace().collect::<Vec<_>>();
+    let Some(git_tokens) = git_command_tokens(&tokens) else {
+        return false;
+    };
+    let Some(subcommand) = git_tokens.first().copied() else {
+        return false;
+    };
+    let args = &git_tokens[1..];
+
+    match subcommand {
+        "restore" | "clean" => true,
+        "reset" => args.contains(&"--hard"),
+        "checkout" => args.iter().any(|token| matches!(*token, "--" | ".")),
+        "stash" => args
+            .first()
+            .is_some_and(|action| matches!(*action, "drop" | "clear")),
+        "branch" | "tag" => args.iter().any(|token| matches!(*token, "-d" | "-D")),
+        "worktree" => args.first().is_some_and(|action| *action == "remove"),
+        "reflog" => args.first().is_some_and(|action| *action == "expire"),
+        _ => false,
+    }
+}
+
+fn git_command_tokens<'a>(tokens: &'a [&'a str]) -> Option<&'a [&'a str]> {
+    let tokens = sudo_command_tokens(tokens);
+    let mut index = 0;
+    if tokens.get(index).map(|token| command_basename(token)) != Some("git") {
+        return None;
+    }
+    index += 1;
+    while let Some(token) = tokens.get(index).copied() {
+        match token {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => {
+                index = (index + 2).min(tokens.len())
+            }
+            _ if token.starts_with("--git-dir=")
+                || token.starts_with("--work-tree=")
+                || token.starts_with("--namespace=") =>
+            {
+                index += 1
+            }
+            _ => break,
+        }
+    }
+    Some(&tokens[index..])
+}
+
+fn sudo_command_tokens<'a>(tokens: &'a [&'a str]) -> &'a [&'a str] {
+    if tokens.first().map(|token| command_basename(token)) != Some("sudo") {
+        return tokens;
+    }
+
+    let mut index = 1;
+    while let Some(token) = tokens.get(index).copied() {
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if shell_assignment_token(token) {
+            index += 1;
+            continue;
+        }
+        if !token.starts_with('-') {
+            break;
+        }
+        index += 1;
+        if matches!(
+            token,
+            "-u" | "--user"
+                | "-g"
+                | "--group"
+                | "-h"
+                | "--host"
+                | "-p"
+                | "--prompt"
+                | "-C"
+                | "--close-from"
+                | "-T"
+                | "--command-timeout"
+                | "-D"
+                | "--chdir"
+        ) {
+            index = (index + 1).min(tokens.len());
+        }
+    }
+    &tokens[index.min(tokens.len())..]
+}
+
+fn shell_assignment_token(token: &str) -> bool {
+    let Some((name, _)) = token.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn command_basename(token: &str) -> &str {
+    let token = token.trim_matches(|ch| matches!(ch, '\'' | '"' | '`'));
+    std::path::Path::new(token)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(token)
+}
+
 fn approve_sync(args: &serde_json::Value) -> Approval {
     let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
     let description = args
@@ -409,7 +628,7 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
 
     eprintln!();
     if !description.is_empty() {
-        eprintln!("{}", color("90", &format!("# {description}")));
+        eprintln!("{} {}", color("32", "#"), color("90", description),);
     }
     eprintln!(
         "{} {}",
@@ -417,24 +636,21 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         color("90", command) // color(risk_color, &format!("[{risk_label}]"))
     );
 
-    for key in &[/* "cwd", */ "timeout", "env"] {
-        let val = args.get(*key);
-        if let Some(v) = val
-            && v != &serde_json::Value::Null
-            && v != &serde_json::Value::String(String::new())
-            && v != &serde_json::Value::Object(serde_json::Map::new())
-        {
-            eprintln!("{}", color("90", &format!("{key}: {v}")));
-        }
+    for line in approval_detail_lines(args) {
+        eprintln!("{}", color("90", &line));
     }
 
-    if APPROVE_ALL.load(Ordering::SeqCst) {
+    if APPROVE_ALL.load(Ordering::SeqCst) && approve_all_applies(risk_label) {
         return Approval::Approve;
     }
     if acp_mode() {
-        return Approval::Approve;
+        return if acp_allows_risk(risk_label) {
+            Approval::Approve
+        } else {
+            Approval::DenyAcpDanger
+        };
     }
-    if APPROVE_SAFE.load(Ordering::SeqCst) && is_safe_command(command) {
+    if APPROVE_SAFE.load(Ordering::SeqCst) && approve_safe_applies(risk_label) {
         eprintln!("{}", color("90", "· auto-approved (safe)"));
         return Approval::Approve;
     }
@@ -445,15 +661,25 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         "write" => color("32", "↵=[y]"),
         _ => color("90", "↵ no (type y)"),
     };
-    eprint!(
-        "  {}  {}  {}  {}  {}  {}",
-        color("32", "[y]"),
-        color("33", "[a]all"),
-        color("36", "[s]safe"),
-        color("31", "[n]"),
-        color("90", "[esc]"),
-        enter_hint
-    );
+    if risk_label == "danger" {
+        eprint!(
+            "  {}  {}  {}  {}",
+            color("32", "[y]"),
+            color("31", "[n]"),
+            color("90", "[esc]"),
+            enter_hint
+        );
+    } else {
+        eprint!(
+            "  {}  {}  {}  {}  {}  {}",
+            color("32", "[y]"),
+            color("33", "[a]all"),
+            color("36", "[s]safe"),
+            color("31", "[n]"),
+            color("90", "[esc]"),
+            enter_hint
+        );
+    }
     let _ = io::stderr().flush();
 
     if io::stdin().is_terminal() && io::stderr().is_terminal() {
@@ -465,6 +691,68 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
         return Approval::Deny;
     }
     approval_from_line(&choice, risk_label)
+}
+
+fn approval_detail_lines(args: &serde_json::Value) -> Vec<String> {
+    ["cwd", "timeout", "env"]
+        .into_iter()
+        .filter_map(|key| {
+            let value = args.get(key)?;
+            if approval_detail_is_empty(key, value) {
+                None
+            } else {
+                Some(format!("{key}: {}", approval_detail_value(key, value)))
+            }
+        })
+        .collect()
+}
+
+fn approval_detail_value(key: &str, value: &serde_json::Value) -> serde_json::Value {
+    if key != "env" {
+        return value.clone();
+    }
+    let Some(env) = value.as_object() else {
+        return value.clone();
+    };
+    serde_json::Value::Object(
+        env.iter()
+            .map(|(k, v)| {
+                let value = if sensitive_env_key(k) {
+                    serde_json::Value::String("[redacted]".to_string())
+                } else {
+                    v.clone()
+                };
+                (k.clone(), value)
+            })
+            .collect(),
+    )
+}
+
+fn approval_detail_is_empty(key: &str, value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(s) => s.is_empty() || (key == "cwd" && s == "."),
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
+fn sensitive_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    [
+        "API_KEY",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "AUTH",
+        "COOKIE",
+        "CREDENTIAL",
+    ]
+    .iter()
+    .any(|marker| upper.contains(marker))
 }
 
 fn merge_shell_env(
@@ -487,6 +775,24 @@ fn shell_timeout_secs(args: &serde_json::Value) -> u64 {
         .and_then(|t| t.as_u64())
         .unwrap_or(60)
         .max(1)
+}
+
+fn sandbox_network_hint(mode: SandboxMode, output: &str) -> Option<&'static str> {
+    if mode != SandboxMode::Fs {
+        return None;
+    }
+    let lower = output.to_ascii_lowercase();
+    [
+        "temporary failure in name resolution",
+        "could not resolve host",
+        "could not resolve hostname",
+        "name or service not known",
+        "network is unreachable",
+        "failed to lookup address information",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    .then_some("hint: default sandbox blocks network; retry with NANO_SANDBOX=fs+net if this command needs network")
 }
 
 async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bool)) -> String {
@@ -556,6 +862,15 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
             );
             let stdout = String::from_utf8_lossy(&output.stdout);
             res.push_str(&stdout);
+            if !output.status.success()
+                && let Some(hint) = sandbox_network_hint(mode, &res)
+            {
+                if !res.ends_with('\n') {
+                    res.push('\n');
+                }
+                res.push_str(hint);
+                res.push('\n');
+            }
             if res.len() > 12000 {
                 res = truncate_tail(&res, 12000);
             }
@@ -630,6 +945,9 @@ async fn execute_shell_tool(args: &serde_json::Value) -> Result<String, ToolCanc
             Ok(execute_shell(args, prepared).await)
         }
         Approval::Deny => Ok(color("31", "denied by user")),
+        Approval::DenyAcpDanger => Ok(format!(
+            "denied: ACP mode will not run [danger] shell commands unless {NANO_ACP_ALLOW_DANGER_ENV}=1"
+        )),
         Approval::Cancel => Err(ToolCancelled::User),
     }
 }
@@ -753,9 +1071,12 @@ pub async fn dispatch_tool_call(name: &str, args_str: &str) -> Result<String, To
 #[cfg(test)]
 mod tests {
     use super::{
-        Approval, LineKey, approval_from_key, approval_from_line, command_risk_label,
-        is_safe_command, merge_shell_env, shell_timeout_secs,
+        Approval, LineKey, acp_allows_risk_with_value, approval_detail_lines, approval_from_key,
+        approval_from_line, approve_all_applies, approve_safe_applies, command_risk_label,
+        is_safe_command, merge_shell_env, sandbox_network_hint, sensitive_env_key,
+        shell_timeout_secs,
     };
+    use nano_agent::sandbox::SandboxMode;
 
     #[test]
     fn approval_choices_include_cancel() {
@@ -764,6 +1085,9 @@ mod tests {
         assert_eq!(approval_from_line("safe", "write"), Approval::ApproveSafe);
         assert_eq!(approval_from_line("cancel", "write"), Approval::Cancel);
         assert_eq!(approval_from_line("nope", "write"), Approval::Deny);
+        assert_eq!(approval_from_line("all", "danger"), Approval::Deny);
+        assert_eq!(approval_from_line("safe", "danger"), Approval::Deny);
+        assert_eq!(approval_from_line("yes", "danger"), Approval::Approve);
 
         assert_eq!(
             approval_from_key(LineKey::Escape, "safe"),
@@ -777,6 +1101,39 @@ mod tests {
             approval_from_key(LineKey::Char('s'), "write"),
             Some(Approval::ApproveSafe)
         );
+        assert_eq!(
+            approval_from_key(LineKey::Char('a'), "danger"),
+            Some(Approval::Deny)
+        );
+        assert_eq!(
+            approval_from_key(LineKey::Char('s'), "danger"),
+            Some(Approval::Deny)
+        );
+    }
+
+    #[test]
+    fn approve_all_never_applies_to_danger() {
+        assert!(approve_all_applies("safe"));
+        assert!(approve_all_applies("write"));
+        assert!(!approve_all_applies("danger"));
+    }
+
+    #[test]
+    fn approve_safe_only_applies_to_safe() {
+        assert!(approve_safe_applies("safe"));
+        assert!(!approve_safe_applies("write"));
+        assert!(!approve_safe_applies("danger"));
+    }
+
+    #[test]
+    fn acp_danger_requires_explicit_env_override() {
+        assert!(acp_allows_risk_with_value("safe", None));
+        assert!(acp_allows_risk_with_value("write", None));
+        assert!(!acp_allows_risk_with_value("danger", None));
+        assert!(!acp_allows_risk_with_value("danger", Some("0")));
+        assert!(!acp_allows_risk_with_value("danger", Some("false")));
+        assert!(acp_allows_risk_with_value("danger", Some("1")));
+        assert!(acp_allows_risk_with_value("danger", Some("yes")));
     }
 
     #[test]
@@ -822,7 +1179,18 @@ mod tests {
         assert!(is_safe_command("ls -la"));
         assert!(is_safe_command("git status"));
         assert!(is_safe_command("cargo test"));
+        assert!(is_safe_command("cargo fmt --check"));
+        assert!(is_safe_command("rustfmt --check src/lib.rs"));
         assert!(is_safe_command("rg TODO src"));
+        assert!(!is_safe_command("cargo fmt"));
+        assert!(!is_safe_command("cargo clippy --fix"));
+        assert!(!is_safe_command("rustfmt src/lib.rs"));
+        assert!(!is_safe_command("sed -i s/a/b/ file.txt"));
+        assert!(!is_safe_command("sed -i.bak s/a/b/ file.txt"));
+        assert!(!is_safe_command("awk -i inplace '{print}' file.txt"));
+        assert!(!is_safe_command("find . -delete"));
+        assert!(!is_safe_command("find . -exec rm {} +"));
+        assert!(!is_safe_command("find . -execdir unlink {} +"));
         assert!(!is_safe_command("rm -rf /"));
         assert!(!is_safe_command("git push origin main"));
         assert!(!is_safe_command("ls && rm -rf /"));
@@ -834,8 +1202,111 @@ mod tests {
     fn risk_labels_match_intent() {
         assert_eq!(command_risk_label("ls").1, "safe");
         assert_eq!(command_risk_label("echo hi > file").1, "write"); // redirect → sticky in BAD of is_safe
+        assert_eq!(command_risk_label("cargo fmt").1, "write");
+        assert_eq!(command_risk_label("rustfmt src/lib.rs").1, "write");
+        assert_eq!(command_risk_label("sed -i s/a/b/ file.txt").1, "write");
+        assert_eq!(command_risk_label("find . -delete").1, "danger");
+        assert_eq!(command_risk_label("find . -exec rm {} +").1, "danger");
+        assert_eq!(
+            command_risk_label("find . -execdir unlink {} +").1,
+            "danger"
+        );
+        assert_eq!(command_risk_label("xargs -0 rm").1, "danger");
         // redirect is non-safe; not always DANGER unless matched - '>' is in safe BAD so write
+        assert_eq!(command_risk_label("rm file.txt").1, "danger");
+        assert_eq!(command_risk_label("/bin/rm file.txt").1, "danger");
+        assert_eq!(command_risk_label("unlink file.txt").1, "danger");
+        assert_eq!(command_risk_label("rmdir old-dir").1, "danger");
+        assert_eq!(command_risk_label("sudo rm file.txt").1, "danger");
+        assert_eq!(command_risk_label("sudo -u root rm file.txt").1, "danger");
+        assert_eq!(
+            command_risk_label("sudo --user root unlink file.txt").1,
+            "danger"
+        );
+        assert_eq!(command_risk_label("sudo FOO=bar rmdir old-dir").1, "danger");
+        assert_eq!(command_risk_label("git rm src/lib.rs").1, "danger");
+        assert_eq!(command_risk_label("cd /tmp && rm file.txt").1, "danger");
         assert_eq!(command_risk_label("rm -rf /tmp/x").1, "danger");
+        assert_eq!(command_risk_label("dd of=/dev/sda if=image").1, "danger");
+        assert_eq!(command_risk_label("rsync --delete src/ dst/").1, "danger");
+        assert_eq!(command_risk_label("shred secrets.txt").1, "danger");
+        assert_eq!(command_risk_label("sudo shred secrets.txt").1, "danger");
+        assert_eq!(command_risk_label("sudo -u").1, "write");
+        assert_eq!(command_risk_label("git -C").1, "write");
         assert_eq!(command_risk_label("git reset --hard HEAD").1, "danger");
+        assert_eq!(command_risk_label("git restore src/lib.rs").1, "danger");
+        assert_eq!(
+            command_risk_label("git -C repo restore src/lib.rs").1,
+            "danger"
+        );
+        assert_eq!(
+            command_risk_label("git -c core.quotePath=false clean -fd").1,
+            "danger"
+        );
+        assert_eq!(command_risk_label("sudo git clean -fd").1, "danger");
+        assert_eq!(command_risk_label("sudo -n git clean -fd").1, "danger");
+        assert_eq!(command_risk_label("sudo -u root git clean -fd").1, "danger");
+        assert_eq!(
+            command_risk_label("sudo --user root git restore src/lib.rs").1,
+            "danger"
+        );
+        assert_eq!(command_risk_label("git checkout -- src/lib.rs").1, "danger");
+        assert_eq!(command_risk_label("git checkout .").1, "danger");
+        assert_eq!(command_risk_label("git clean -fd").1, "danger");
+        assert_eq!(command_risk_label("git stash drop").1, "danger");
+        assert_eq!(command_risk_label("git stash clear").1, "danger");
+        assert_eq!(command_risk_label("git branch -D old").1, "danger");
+        assert_eq!(command_risk_label("git tag -d old").1, "danger");
+        assert_eq!(command_risk_label("git worktree remove ../wt").1, "danger");
+        assert_eq!(
+            command_risk_label("git reflog expire --expire=now --all").1,
+            "danger"
+        );
+    }
+
+    #[test]
+    fn approval_details_include_meaningful_cwd() {
+        assert!(approval_detail_lines(&serde_json::json!({"cwd": "."})).is_empty());
+        assert_eq!(
+            approval_detail_lines(&serde_json::json!({
+                "cwd": "/tmp/project",
+                "timeout": 5,
+                "env": {"RUST_LOG": "debug"}
+            })),
+            vec![
+                r#"cwd: "/tmp/project""#.to_string(),
+                "timeout: 5".to_string(),
+                r#"env: {"RUST_LOG":"debug"}"#.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn approval_details_redact_sensitive_env_values() {
+        let lines = approval_detail_lines(&serde_json::json!({
+            "env": {
+                "OPENAI_API_KEY": "sk-secret",
+                "GITHUB_TOKEN": "ghp-secret",
+                "RUST_LOG": "debug"
+            }
+        }));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains(r#""OPENAI_API_KEY":"[redacted]""#));
+        assert!(lines[0].contains(r#""GITHUB_TOKEN":"[redacted]""#));
+        assert!(lines[0].contains(r#""RUST_LOG":"debug""#));
+        assert!(!lines[0].contains("sk-secret"));
+        assert!(!lines[0].contains("ghp-secret"));
+        assert!(sensitive_env_key("AWS_SECRET_ACCESS_KEY"));
+        assert!(sensitive_env_key("AUTHORIZATION"));
+        assert!(!sensitive_env_key("RUST_LOG"));
+    }
+
+    #[test]
+    fn fs_sandbox_hints_on_network_failures_only() {
+        let output = "$ cargo test\nexit 101\nCould not resolve host: index.crates.io\n";
+        assert!(sandbox_network_hint(SandboxMode::Fs, output).is_some());
+        assert!(sandbox_network_hint(SandboxMode::FsNet, output).is_none());
+        assert!(sandbox_network_hint(SandboxMode::Off, output).is_none());
+        assert!(sandbox_network_hint(SandboxMode::Fs, "exit 1\nsyntax error").is_none());
     }
 }

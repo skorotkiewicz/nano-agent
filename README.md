@@ -41,9 +41,16 @@ $ rg --files -t rust  [safe]
 |-----|---------|
 | **Enter** | accept the **suggestion** from the risk tag: `[safe]` → `s`, `[write]` → `y`; `[danger]` will **not** run (type `y` explicitly) |
 | `y` | run this once |
-| `a` | run **all** remaining this turn |
-| `s` | run this + auto-ok **safe** patterns (`ls`, `git status`, `cargo test`, `rg`, …) |
+| `a` | run remaining non-danger commands this turn |
+| `s` | run this non-danger command + auto-ok **safe** patterns (`ls`, `git status`, `cargo test`, `cargo fmt --check`, `rg`, …) |
 | `n` / Esc | deny / cancel turn |
+
+Non-default `cwd`, `timeout`, and `env` are shown before approval; secret-looking env values are redacted.
+Source-editing commands like `cargo fmt`, `rustfmt file`, and `sed -i` are not `[safe]`.
+Deletion commands like `rm`, `unlink`, `rmdir`, `git rm`, `find -delete`, `find -exec rm`, and `xargs rm` are `[danger]`, including common `sudo` wrappers.
+Data-destroying commands like `dd of=...`, `rsync --delete`, and `shred` are `[danger]`.
+Git discard/delete commands like `git restore`, `git checkout --`, `git clean`, `git stash drop`, and `git branch -D` are `[danger]`, including common `sudo` / `git -C` forms.
+`[danger]` commands always need explicit `y`; Enter, `a`, and `s` refuse them.
 
 REPL: `›` prompt · `:q` · `:reset` · `:config` · `/mito` · `/self-harness <validator>` · line ending `\` continues.
 
@@ -85,20 +92,24 @@ Project overlay: `./nano_config.json`. See [example_config.json](example_config.
 | `NANO_MAX_STEPS` | tool-loop cap (default 200) |
 | `NANO_SANDBOX` | `off` · `fs` (default, no net) · `fs+net` |
 
+If a command fails with a network-looking error under the default sandbox, nano prints a `NANO_SANDBOX=fs+net` hint.
+
 ## Optional extras
 
 - **MCP** — `mcp_servers` in config
 - **mito** — `/mito` local planner (needs `mito-mode` + chat-completions provider)
 - **self-harness** — `/self-harness cargo test` proposes `.nano/harness.md` if validator passes
 - **ACP** — `--features acp` → `nano-agent --acp` and child agents under `acp_agents`
+  - ACP shell calls refuse `[danger]` commands by default; set `NANO_ACP_ALLOW_DANGER=1` in that agent's env to allow them.
 
 ## Design (why this, not AutoGPT)
 
 1. **Trust boundary is the human.** Every shell line is visible; risk-tagged (`safe` / `write` / `danger`).
 2. **One primary tool.** Multi-tool dragons hide failure modes.
 3. **Short system prompt.** Procedures the model can follow, not a novel.
-4. **Session resume that fails loud.** Format mismatch → start fresh, don't half-context.
-5. **Sandbox with a name.** `fs` vs `fs+net` vs `off` — isolation is a policy, not a mystery.
+4. **Preserve user work.** Before edits/deletes in a git repo, Nano is told to inspect status and avoid clobbering.
+5. **Session resume that fails loud.** Format mismatch → start fresh, don't half-context.
+6. **Sandbox with a name.** `fs` vs `fs+net` vs `off` — isolation is a policy, not a mystery.
 
 ## Arch
 
