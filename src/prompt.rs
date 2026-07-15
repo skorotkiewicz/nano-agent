@@ -2,9 +2,9 @@
 
 use crate::policy::{acp_allowed_root, expose_execute_shell_tools};
 use crate::self_harness::load_active_harness;
-use crate::state::context_cwd;
 #[cfg(feature = "acp")]
 use crate::state::get_config;
+use crate::state::{context_cwd, no_context};
 use dirs::home_dir;
 use std::collections::HashMap;
 use std::env;
@@ -106,6 +106,9 @@ pub fn find_files(roots: Vec<String>, names: Vec<&str>, limit: usize) -> String 
 }
 
 pub fn get_system() -> String {
+    if no_context() {
+        return String::new();
+    }
     let cwd = context_cwd();
     let mut cache = SYSTEM_CACHE
         .get_or_init(Mutex::default)

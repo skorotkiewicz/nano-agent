@@ -13,6 +13,7 @@ pub static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
 /// After the user picks [s] Safe, auto-approve read-only command patterns this turn.
 pub static APPROVE_SAFE: AtomicBool = AtomicBool::new(false);
 pub static ACP_MODE: AtomicBool = AtomicBool::new(false);
+static NO_CONTEXT: AtomicBool = AtomicBool::new(false);
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -50,6 +51,14 @@ pub fn is_tty() -> bool {
 
 pub fn acp_mode() -> bool {
     ACP_MODE.load(Ordering::SeqCst)
+}
+
+pub fn set_no_context(value: bool) {
+    NO_CONTEXT.store(value, Ordering::SeqCst);
+}
+
+pub fn no_context() -> bool {
+    NO_CONTEXT.load(Ordering::SeqCst)
 }
 
 pub fn reset_turn_state() {

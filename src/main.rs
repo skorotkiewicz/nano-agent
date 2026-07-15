@@ -34,6 +34,7 @@ fn print_usage() {
          Flags:\n\
            -c                 continue last session in this directory\n\
            -s                 pick a recent session in this directory\n\
+           --no-ctx           omit Nano/project system context\n\
            --show-config      print effective provider/model/sandbox and exit\n\
            --help, -h         show this help\n\
            --acp              run as ACP stdio agent (needs --features acp)\n\n\
@@ -64,6 +65,12 @@ fn http_client() -> Client {
         .timeout(Duration::from_secs(300))
         .build()
         .unwrap_or_else(|_| Client::new())
+}
+
+fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
+    let found = args.iter().any(|arg| arg == flag);
+    args.retain(|arg| arg != flag);
+    found
 }
 
 /// `! cmd` (visible to model) or `!! cmd` (stdout only, hidden from model).
@@ -284,6 +291,7 @@ fn ensure_session_format(current: provider::ApiFormat, session: &Session) {
 #[tokio::main]
 async fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
+    state::set_no_context(take_flag(&mut args, "--no-ctx"));
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_usage();
@@ -359,7 +367,20 @@ async fn main() {
 
 #[cfg(test)]
 mod bang_tests {
-    use super::strip_shell_bang;
+    use super::{strip_shell_bang, take_flag};
+
+    #[test]
+    fn no_context_flag_is_removed_from_prompt_args() {
+        let mut args = vec![
+            "-c".to_string(),
+            "--no-ctx".to_string(),
+            "hello".to_string(),
+            "--no-ctx".to_string(),
+        ];
+        assert!(take_flag(&mut args, "--no-ctx"));
+        assert_eq!(args, ["-c", "hello"]);
+        assert!(!take_flag(&mut args, "--no-ctx"));
+    }
 
     #[test]
     fn bang_parses_visible_and_hidden() {

@@ -230,9 +230,9 @@ async fn respond_responses(
 
     let mut body = serde_json::json!({
         "model": target.model.as_str(),
-        "instructions": get_system(),
         "input": payload
     });
+    add_responses_instructions(&mut body, get_system());
     // Some local servers reject empty "tools": []; omit when unused.
     if !tools.is_empty() {
         body["tools"] = serde_json::Value::Array(tools);
@@ -247,6 +247,12 @@ async fn respond_responses(
         get_config().get_temperature(),
     );
     respond_api(client, &target, body).await
+}
+
+fn add_responses_instructions(body: &mut serde_json::Value, system: String) {
+    if !system.is_empty() {
+        body["instructions"] = serde_json::Value::String(system);
+    }
 }
 
 fn text(response: &serde_json::Value) -> String {
@@ -389,8 +395,20 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
 
 // --- Chat Completions API Mode ---
 
-/// Keep the first system message current (harness overlay, diy sandbox policy, cwd).
+/// Keep the first system message current, or remove it for `--no-ctx`.
 fn ensure_system_message(messages: &mut Vec<serde_json::Value>, system: &str) {
+    if system.is_empty() {
+        if messages
+            .first()
+            .and_then(|message| message.get("role"))
+            .and_then(|role| role.as_str())
+            == Some("system")
+        {
+            messages.remove(0);
+        }
+        return;
+    }
+
     let system_msg = serde_json::json!({"role": "system", "content": system});
     if messages
         .first()
@@ -623,8 +641,8 @@ pub async fn run_chat_with_system(
 #[cfg(test)]
 mod tests {
     use super::{
-        TurnCancelled, drop_orphaned_tool_messages, ensure_system_message, parse_api_body,
-        tool_limit_reached,
+        TurnCancelled, add_responses_instructions, drop_orphaned_tool_messages,
+        ensure_system_message, parse_api_body, tool_limit_reached,
     };
     use crate::tools::ToolCancelled;
 
@@ -672,6 +690,23 @@ mod tests {
         ensure_system_message(&mut empty, "fresh");
         assert_eq!(empty[0]["role"], "system");
         assert_eq!(empty[0]["content"], "fresh");
+
+        ensure_system_message(&mut messages, "");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+
+        ensure_system_message(&mut empty, "");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn empty_responses_context_omits_instructions() {
+        let mut body = serde_json::json!({"model": "test"});
+        add_responses_instructions(&mut body, String::new());
+        assert!(body.get("instructions").is_none());
+
+        add_responses_instructions(&mut body, "system".to_string());
+        assert_eq!(body["instructions"], "system");
     }
 
     #[test]
