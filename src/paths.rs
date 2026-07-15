@@ -37,8 +37,33 @@ pub fn session_file_for_cwd(cwd: &str) -> PathBuf {
 
 /// Create `~/.nano` (+ `sessions/`) on demand. Best-effort; callers ignore errors.
 pub fn ensure_nano_dirs() {
-    let _ = std::fs::create_dir_all(nano_sessions_dir());
+    let home = nano_home();
+    let sessions = home.join("sessions");
+    let _ = std::fs::create_dir_all(&sessions);
+    make_private(&home, 0o700);
+    make_private(&sessions, 0o700);
+    make_private(&home.join("config.json"), 0o600);
+    make_private(&home.join("mcp_cache.json"), 0o600);
+    if let Ok(entries) = std::fs::read_dir(sessions) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                make_private(&entry.path(), 0o600);
+            }
+        }
+    }
 }
+
+#[cfg(unix)]
+fn make_private(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if path.exists() {
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+}
+
+#[cfg(not(unix))]
+fn make_private(_path: &Path, _mode: u32) {}
 
 /// Lexically normalize a path: resolve `.` and `..` components without
 /// touching the filesystem.

@@ -161,10 +161,11 @@ fn ensure_mito_target(provider_name: &str, target: ApiTarget) -> Result<ApiTarge
 }
 
 pub fn get_api_target() -> ApiTarget {
-    if let Some(provider_name) = get_config().get_provider()
-        && let Some(target) = custom_provider_target(provider_name, None)
-    {
-        return target;
+    if let Some(provider_name) = get_config().get_provider() {
+        return custom_provider_target(provider_name, None).unwrap_or_else(|| {
+            eprintln!("configured provider '{provider_name}' is not present in custom_providers");
+            std::process::exit(2);
+        });
     }
 
     if let Ok(base) = env::var("OPENAI_BASE_URL") {

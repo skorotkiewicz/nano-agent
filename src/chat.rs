@@ -5,7 +5,7 @@ use crate::input::CancelListen;
 use crate::policy::{expose_execute_shell_tools, expose_mcp_tools};
 use crate::prompt::get_system;
 use crate::provider::{ApiTarget, apply_generation_controls, get_api_target};
-use crate::state::{color, get_config, get_max_steps, get_mcp_client, is_tty, request_cancel};
+use crate::state::{color, get_config, get_max_steps, get_mcp_client, is_tty};
 use crate::tools::{ToolCancelled, dispatch_tool_call, get_tool_chat, get_tool_responses};
 #[cfg(feature = "acp")]
 use crate::{
@@ -163,7 +163,6 @@ async fn respond_api(
         tokio::select! {
             res = api => res,
             _ = cancel.wait() => {
-                request_cancel();
                 Err(ApiCallError::Cancelled)
             }
         }
@@ -303,7 +302,8 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
 
     // Keep the last known Responses id on failure so mid-turn API errors don't
     // wipe previous_response_id and break -c/-s resume.
-    let mut prev_id = previous.map(String::from);
+    let resume_id = previous.map(String::from);
+    let mut prev_id = resume_id.clone();
 
     let mut response = match handle_api_result(
         respond_responses(client, payload, previous).await,
@@ -318,7 +318,8 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
         prev_id = Some(id.to_string());
     }
 
-    for _ in 0..get_max_steps() {
+    let max_steps = get_max_steps();
+    for completed_steps in 0..=max_steps {
         let calls: Vec<&serde_json::Value> = response
             .get("output")
             .and_then(|o| o.as_array())
@@ -334,6 +335,9 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
             messages.push(serde_json::json!({"role": "assistant", "content": answer}));
             return Ok((answer, prev_id, Some(messages)));
         }
+        if tool_limit_reached(completed_steps, max_steps) {
+            break;
+        }
 
         let mut outputs = Vec::new();
         let mut tool_invocations = Vec::new();
@@ -344,7 +348,7 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
                 .get("arguments")
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
-            // log_tool_call(name, args);
+            log_tool_call(name, args);
             tool_invocations.push((name, args));
             let (output, message) = tool_output_responses(call).await?;
             outputs.push(output);
@@ -379,7 +383,8 @@ pub async fn run_responses(client: &Client, prompt: &str, previous: Option<&str>
 
     let stopped = "stopped: too many tool calls".to_string();
     messages.push(serde_json::json!({"role": "assistant", "content": stopped}));
-    Ok((stopped, prev_id, Some(messages)))
+    // A response that still contains tool calls is not a safe resume point.
+    Ok((stopped, resume_id, Some(messages)))
 }
 
 // --- Chat Completions API Mode ---
@@ -450,7 +455,8 @@ fn prepare_chat_messages(messages: &[serde_json::Value]) -> Vec<serde_json::Valu
             .first()
             .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
             .cloned();
-        let drop = out.len() - MAX_MSGS;
+        let keep = MAX_MSGS.saturating_sub(usize::from(system.is_some()));
+        let drop = out.len() - keep;
         out.drain(0..drop);
         if let Some(system) = system
             && out
@@ -462,6 +468,7 @@ fn prepare_chat_messages(messages: &[serde_json::Value]) -> Vec<serde_json::Valu
             out.insert(0, system);
         }
     }
+    drop_orphaned_tool_messages(&mut out);
     for message in &mut out {
         if let Some(content) = message.get_mut("content")
             && let Some(text) = content.as_str()
@@ -475,6 +482,28 @@ fn prepare_chat_messages(messages: &[serde_json::Value]) -> Vec<serde_json::Valu
         }
     }
     out
+}
+
+fn drop_orphaned_tool_messages(messages: &mut Vec<serde_json::Value>) {
+    let first_history = usize::from(
+        messages
+            .first()
+            .and_then(|message| message.get("role"))
+            .and_then(|role| role.as_str())
+            == Some("system"),
+    );
+    while messages
+        .get(first_history)
+        .and_then(|message| message.get("role"))
+        .and_then(|role| role.as_str())
+        == Some("tool")
+    {
+        messages.remove(first_history);
+    }
+}
+
+fn tool_limit_reached(completed_steps: usize, max_steps: usize) -> bool {
+    completed_steps >= max_steps
 }
 
 async fn tool_output_chat(
@@ -519,7 +548,8 @@ pub async fn run_chat_with_system(
         Err(outcome) => return outcome,
     };
 
-    for _ in 0..get_max_steps() {
+    let max_steps = get_max_steps();
+    for completed_steps in 0..=max_steps {
         let choice = response
             .get("choices")
             .and_then(|c| c.get(0))
@@ -545,15 +575,18 @@ pub async fn run_chat_with_system(
             .cloned()
             .unwrap_or_default();
 
-        messages.push(msg);
-
         if tool_calls.is_empty() {
+            messages.push(msg);
             return Ok((
                 text_content,
                 Some("chat-session".to_string()),
                 Some(messages),
             ));
         }
+        if tool_limit_reached(completed_steps, max_steps) {
+            break;
+        }
+        messages.push(msg);
 
         for call in &tool_calls {
             let call_id = call.get("id").and_then(|c| c.as_str()).unwrap_or("call_1");
@@ -564,7 +597,7 @@ pub async fn run_chat_with_system(
                 .and_then(|a| a.as_str())
                 .unwrap_or("{}");
 
-            // log_tool_call(name, args_str);
+            log_tool_call(name, args_str);
 
             let output = tool_output_chat(name, args_str, call_id).await?;
             messages.push(output);
@@ -589,7 +622,10 @@ pub async fn run_chat_with_system(
 
 #[cfg(test)]
 mod tests {
-    use super::{TurnCancelled, ensure_system_message, parse_api_body};
+    use super::{
+        TurnCancelled, drop_orphaned_tool_messages, ensure_system_message, parse_api_body,
+        tool_limit_reached,
+    };
     use crate::tools::ToolCancelled;
 
     #[test]
@@ -636,5 +672,24 @@ mod tests {
         ensure_system_message(&mut empty, "fresh");
         assert_eq!(empty[0]["role"], "system");
         assert_eq!(empty[0]["content"], "fresh");
+    }
+
+    #[test]
+    fn tool_limit_allows_final_answer_inspection() {
+        assert!(!tool_limit_reached(0, 1));
+        assert!(tool_limit_reached(1, 1));
+        assert!(tool_limit_reached(0, 0));
+    }
+
+    #[test]
+    fn trimmed_chat_history_drops_orphaned_tool_results() {
+        let mut messages = vec![
+            serde_json::json!({"role": "system", "content": "system"}),
+            serde_json::json!({"role": "tool", "tool_call_id": "old", "content": "old"}),
+            serde_json::json!({"role": "assistant", "content": "answer"}),
+        ];
+        drop_orphaned_tool_messages(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
     }
 }

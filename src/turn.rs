@@ -5,7 +5,9 @@ use crate::chat::{run_chat, run_responses};
 use crate::provider::ApiFormat;
 #[cfg(feature = "acp")]
 use crate::provider::get_api_target;
-use crate::session::{SessionState, append_session_messages, save_session};
+use crate::session::{
+    SessionState, append_session_messages, normalize_session_label, save_session,
+};
 // use crate::state::color;
 use reqwest::Client;
 
@@ -16,12 +18,11 @@ pub async fn run_state_turn(
     label: &mut Option<String>,
     label_prompt: &str,
 ) -> String {
-    crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
-    crate::state::APPROVE_SAFE.store(false, std::sync::atomic::Ordering::SeqCst);
-    crate::state::clear_cancel();
+    crate::state::reset_turn_state();
 
     // `! cmd` notes for Responses are carried as a prefix on the next user message.
-    let prompt_for_api = match state.take_pending_context() {
+    let pending_context = state.take_pending_context();
+    let prompt_for_api = match pending_context.as_deref() {
         Some(ctx) => format!("{ctx}\n\n{prompt}"),
         None => prompt.to_string(),
     };
@@ -36,13 +37,16 @@ pub async fn run_state_turn(
     let (answer, prev_id, new_messages) = match result {
         Ok(values) => values,
         Err(_cancelled) => {
+            state.restore_pending_context(pending_context);
             // if cancelled.should_report() {
             //     eprintln!("{}", color("90", "cancelled (esc)"));
             // }
             return String::new();
         }
     };
-    let session_label = label.as_deref().unwrap_or(label_prompt);
+    let session_label = label
+        .clone()
+        .unwrap_or_else(|| normalize_session_label(label_prompt));
 
     match state {
         SessionState::Responses {
@@ -50,7 +54,7 @@ pub async fn run_state_turn(
         } => {
             if let Some(ref id) = prev_id {
                 let merged_messages = append_session_messages(messages, new_messages);
-                save_session(id, session_label, ApiFormat::Responses, merged_messages);
+                save_session(id, &session_label, ApiFormat::Responses, merged_messages);
             }
             *previous = prev_id;
         }
@@ -58,7 +62,7 @@ pub async fn run_state_turn(
             if let Some(msgs) = new_messages {
                 save_session(
                     "chat-session",
-                    session_label,
+                    &session_label,
                     ApiFormat::ChatCompletions,
                     Some(msgs.clone()),
                 );
@@ -68,7 +72,7 @@ pub async fn run_state_turn(
     }
 
     if label.is_none() {
-        *label = Some(label_prompt.to_string());
+        *label = Some(session_label);
     }
 
     answer
@@ -77,9 +81,7 @@ pub async fn run_state_turn(
 /// One stateless turn: no session persistence, no conversation carry-over.
 #[cfg(feature = "acp")]
 pub async fn run_single_turn(client: &Client, prompt: &str) -> String {
-    crate::state::APPROVE_ALL.store(false, std::sync::atomic::Ordering::SeqCst);
-    crate::state::APPROVE_SAFE.store(false, std::sync::atomic::Ordering::SeqCst);
-    crate::state::clear_cancel();
+    crate::state::reset_turn_state();
     let result = match get_api_target().format {
         ApiFormat::Responses => run_responses(client, prompt, None).await,
         ApiFormat::ChatCompletions => run_chat(client, prompt, vec![]).await,

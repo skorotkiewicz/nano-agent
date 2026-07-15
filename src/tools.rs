@@ -4,9 +4,7 @@
 use crate::input::CancelListen;
 use crate::input::{LineKey, RawTerminal, read_line_key};
 use crate::policy::{expose_mcp_tools, prepare_shell_execution};
-use crate::state::{
-    APPROVE_ALL, APPROVE_SAFE, acp_mode, color, get_mcp_client, request_cancel, truncate_tail,
-};
+use crate::state::{APPROVE_ALL, APPROVE_SAFE, acp_mode, color, get_mcp_client};
 #[cfg(feature = "acp")]
 use crate::{
     policy::expose_acp_delegate_tools,
@@ -20,9 +18,11 @@ use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
+use tokio::io::AsyncReadExt;
 use tokio::time::{Duration, timeout};
 
 const NANO_ACP_ALLOW_DANGER_ENV: &str = "NANO_ACP_ALLOW_DANGER";
+const MAX_SHELL_OUTPUT_BYTES: usize = 12_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCancelled {
@@ -232,7 +232,13 @@ fn acp_allows_risk(risk: &str) -> bool {
 }
 
 fn acp_allows_risk_with_value(risk: &str, value: Option<&str>) -> bool {
-    risk != "danger" || value.is_some_and(|value| !crate::state::env_flag_is_false(value))
+    risk != "danger"
+        || value.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
 }
 
 /// Read-only-ish command lines the user can batch-approve with [s] Safe.
@@ -263,7 +269,6 @@ pub fn is_safe_command(command: &str) -> bool {
             | "wc"
             | "rg"
             | "grep"
-            | "find"
             | "git"
             | "cargo"
             | "file"
@@ -274,14 +279,11 @@ pub fn is_safe_command(command: &str) -> bool {
             | "date"
             | "uname"
             | "whoami"
-            | "env"
             | "printenv"
             | "tree"
             | "bat"
             | "fd"
             | "jq"
-            | "sed"
-            | "awk"
             | "diff"
             | "hexdump"
             | "xxd"
@@ -308,7 +310,6 @@ pub fn is_safe_command(command: &str) -> bool {
             | "node"
             | "rustc"
             | "rustfmt"
-            | "clippy-driver"
     ) && safe_subcommand(base, line)
 }
 
@@ -323,8 +324,6 @@ fn safe_subcommand(base: &str, line: &str) -> bool {
                     | "log"
                     | "diff"
                     | "show"
-                    | "branch"
-                    | "remote"
                     | "rev-parse"
                     | "describe"
                     | "ls-files"
@@ -338,13 +337,6 @@ fn safe_subcommand(base: &str, line: &str) -> bool {
         }),
         // cargo: source-writing subcommands need explicit approval unless in check mode.
         "cargo" => cargo_safe_subcommand(&tokens),
-        "find" => {
-            !tokens.contains(&"-delete")
-                && !tokens.contains(&"-exec")
-                && !tokens.contains(&"-execdir")
-        }
-        "sed" => !tokens.iter().skip(1).any(|token| token.starts_with("-i")),
-        "awk" => !tokens.iter().skip(1).any(|token| *token == "-i"),
         "rustfmt" => formatter_safe_args(&tokens),
         // interpreters: version / help only (no free-form scripts)
         "python" | "python3" | "node" | "rustc" => tokens.iter().skip(1).all(|t| {
@@ -452,12 +444,11 @@ fn segment_looks_like_delete_command(segment: &str) -> bool {
     if matches!(first, "rm" | "unlink" | "rmdir") {
         return true;
     }
-    if first == "git"
-        && tokens
-            .get(1)
-            .map(|subcommand| subcommand.eq_ignore_ascii_case("rm"))
-            .unwrap_or(false)
-    {
+    if git_command_tokens(tokens).is_some_and(|git_tokens| {
+        git_tokens
+            .first()
+            .is_some_and(|subcommand| subcommand.eq_ignore_ascii_case("rm"))
+    }) {
         return true;
     }
     if first == "find" {
@@ -527,7 +518,9 @@ fn segment_looks_like_destructive_git_command(segment: &str) -> bool {
         "stash" => args
             .first()
             .is_some_and(|action| matches!(*action, "drop" | "clear")),
-        "branch" | "tag" => args.iter().any(|token| matches!(*token, "-d" | "-D")),
+        "branch" | "tag" => args
+            .iter()
+            .any(|token| matches!(*token, "-d" | "-D" | "--delete")),
         "worktree" => args.first().is_some_and(|action| *action == "remove"),
         "reflog" => args.first().is_some_and(|action| *action == "expire"),
         _ => false,
@@ -633,7 +626,7 @@ fn approve_sync(args: &serde_json::Value) -> Approval {
     eprintln!(
         "{} {}",
         color("31", "$"),
-        color("90", command) // color(risk_color, &format!("[{risk_label}]"))
+        color("90", command) // :KEEP AS IS: color(risk_color, &format!("[{risk_label}]"))
     );
 
     for line in approval_detail_lines(args) {
@@ -795,17 +788,106 @@ fn sandbox_network_hint(mode: SandboxMode, output: &str) -> Option<&'static str>
     .then_some("hint: default sandbox blocks network; retry with NANO_SANDBOX=fs+net if this command needs network")
 }
 
-async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bool)) -> String {
+struct ShellOutput {
+    status: std::process::ExitStatus,
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn push_output_tail(output: &mut Vec<u8>, chunk: &[u8], max: usize) -> bool {
+    if max == 0 {
+        let truncated = !output.is_empty() || !chunk.is_empty();
+        output.clear();
+        return truncated;
+    }
+    if chunk.len() >= max {
+        let truncated = !output.is_empty() || chunk.len() > max;
+        output.clear();
+        output.extend_from_slice(&chunk[chunk.len() - max..]);
+        return truncated;
+    }
+
+    let overflow = output.len().saturating_add(chunk.len()).saturating_sub(max);
+    if overflow > 0 {
+        output.drain(..overflow);
+    }
+    output.extend_from_slice(chunk);
+    overflow > 0
+}
+
+async fn collect_shell_output(mut child: tokio::process::Child) -> io::Result<ShellOutput> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("shell stdout was not piped"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("shell stderr was not piped"))?;
+    let read_output = async move {
+        let mut output = Vec::new();
+        let mut stdout_chunk = [0; 8192];
+        let mut stderr_chunk = [0; 8192];
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        let mut truncated = false;
+        while !stdout_done || !stderr_done {
+            tokio::select! {
+                read = stdout.read(&mut stdout_chunk), if !stdout_done => {
+                    let read = read?;
+                    stdout_done = read == 0;
+                    if read > 0 {
+                        truncated |= push_output_tail(
+                            &mut output,
+                            &stdout_chunk[..read],
+                            MAX_SHELL_OUTPUT_BYTES,
+                        );
+                    }
+                }
+                read = stderr.read(&mut stderr_chunk), if !stderr_done => {
+                    let read = read?;
+                    stderr_done = read == 0;
+                    if read > 0 {
+                        truncated |= push_output_tail(
+                            &mut output,
+                            &stderr_chunk[..read],
+                            MAX_SHELL_OUTPUT_BYTES,
+                        );
+                    }
+                }
+            }
+        }
+        Ok::<_, io::Error>((output, truncated))
+    };
+
+    let (status, (bytes, truncated)) = tokio::try_join!(child.wait(), read_output)?;
+    Ok(ShellOutput {
+        status,
+        bytes,
+        truncated,
+    })
+}
+
+fn execution_error(error: &io::Error, sandbox_enabled: bool) -> String {
+    let mut message = format!("ExecutionError: {error}");
+    if error.kind() == io::ErrorKind::NotFound && sandbox_enabled {
+        message.push_str("\nhint: bwrap not found (install bubblewrap) or set NANO_SANDBOX=off");
+    }
+    message
+}
+
+async fn execute_shell(
+    args: &serde_json::Value,
+    prepared: (PathBuf, PathBuf, bool),
+) -> Result<String, ToolCancelled> {
     let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("");
     if command.trim().is_empty() {
-        return "bad arguments: command is required".to_string();
+        return Ok("bad arguments: command is required".to_string());
     }
     let timeout_secs = shell_timeout_secs(args);
     let env_vars = args.get("env").and_then(|e| e.as_object());
 
     let (run_cwd, writable_root, force_sandbox) = prepared;
-
-    let merged_command = format!("{} 2>&1", command);
 
     // NANO_SANDBOX: 0/off | fs (default) | fs+net (share-net for installs/curl).
     // Restricted ACP children always keep fs isolation; force_sandbox never drops to Off.
@@ -822,13 +904,21 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
         .with_cwd(writable_root)
         .restrict_to_cwd(force_sandbox);
 
-    let mut cmd = sandbox.wrap_command(&merged_command);
+    let mut cmd = sandbox.wrap_command(command);
     cmd.current_dir(&run_cwd);
     cmd.envs(merge_shell_env(env_vars));
 
     cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
     // ponytail: kill_on_drop so timeout/cancel reaps the child
     cmd.kill_on_drop(true);
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => return Ok(execution_error(&error, sandbox.mode().enabled())),
+    };
+    let run = collect_shell_output(child);
 
     let cancel = if acp_mode() {
         None
@@ -837,20 +927,19 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
     };
     let output_result = match cancel {
         Some(cancel) => {
-            let timed = timeout(Duration::from_secs(timeout_secs), cmd.output());
+            let timed = timeout(Duration::from_secs(timeout_secs), run);
             tokio::select! {
                 res = timed => {
                     drop(cancel);
                     res
                 }
                 _ = cancel.wait() => {
-                    request_cancel();
-                    drop(cancel); // kill_on_drop reaps shell when select cancels timed future
-                    return format!("$ {command}\ncancelled by user (esc)\n");
+                    drop(cancel);
+                    return Err(ToolCancelled::User);
                 }
             }
         }
-        None => timeout(Duration::from_secs(timeout_secs), cmd.output()).await,
+        None => timeout(Duration::from_secs(timeout_secs), run).await,
     };
 
     match output_result {
@@ -860,7 +949,10 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
                 command,
                 output.status.code().unwrap_or(-1)
             );
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            if output.truncated {
+                res.push_str("[…output truncated…]\n");
+            }
+            let stdout = String::from_utf8_lossy(&output.bytes);
             res.push_str(&stdout);
             if !output.status.success()
                 && let Some(hint) = sandbox_network_hint(mode, &res)
@@ -871,21 +963,10 @@ async fn execute_shell(args: &serde_json::Value, prepared: (PathBuf, PathBuf, bo
                 res.push_str(hint);
                 res.push('\n');
             }
-            if res.len() > 12000 {
-                res = truncate_tail(&res, 12000);
-            }
-            res
+            Ok(res)
         }
-        Ok(Err(e)) => {
-            let mut msg = format!("ExecutionError: {e}");
-            if e.kind() == std::io::ErrorKind::NotFound && sandbox.mode().enabled() {
-                msg.push_str(
-                    "\nhint: bwrap not found (install bubblewrap) or set NANO_SANDBOX=off",
-                );
-            }
-            msg
-        }
-        Err(_) => format!("$ {}\ntimeout after {}s\n", command, timeout_secs),
+        Ok(Err(error)) => Ok(execution_error(&error, sandbox.mode().enabled())),
+        Err(_) => Ok(format!("$ {}\ntimeout after {}s\n", command, timeout_secs)),
     }
 }
 
@@ -904,7 +985,9 @@ pub async fn run_user_shell(command: &str) -> String {
         "description": "user shell",
     });
     match prepare_shell_execution(&args) {
-        Ok(prepared) => execute_shell(&args, prepared).await,
+        Ok(prepared) => execute_shell(&args, prepared)
+            .await
+            .unwrap_or_else(|_| format!("$ {command}\ncancelled by user (esc)\n")),
         Err(error) => error,
     }
 }
@@ -934,15 +1017,15 @@ async fn execute_shell_tool(args: &serde_json::Value) -> Result<String, ToolCanc
         .await
         .unwrap_or(Approval::Deny);
     match approval {
-        Approval::Approve => Ok(execute_shell(args, prepared).await),
+        Approval::Approve => execute_shell(args, prepared).await,
         Approval::ApproveAll => {
             APPROVE_ALL.store(true, Ordering::SeqCst);
-            Ok(execute_shell(args, prepared).await)
+            execute_shell(args, prepared).await
         }
         Approval::ApproveSafe => {
             // Approve this command once; subsequent safe-pattern commands auto-pass this turn.
             APPROVE_SAFE.store(true, Ordering::SeqCst);
-            Ok(execute_shell(args, prepared).await)
+            execute_shell(args, prepared).await
         }
         Approval::Deny => Ok(color("31", "denied by user")),
         Approval::DenyAcpDanger => Ok(format!(
@@ -1073,8 +1156,8 @@ mod tests {
     use super::{
         Approval, LineKey, acp_allows_risk_with_value, approval_detail_lines, approval_from_key,
         approval_from_line, approve_all_applies, approve_safe_applies, command_risk_label,
-        is_safe_command, merge_shell_env, sandbox_network_hint, sensitive_env_key,
-        shell_timeout_secs,
+        is_safe_command, merge_shell_env, push_output_tail, sandbox_network_hint,
+        sensitive_env_key, shell_timeout_secs,
     };
     use nano_agent::sandbox::SandboxMode;
 
@@ -1130,8 +1213,10 @@ mod tests {
         assert!(acp_allows_risk_with_value("safe", None));
         assert!(acp_allows_risk_with_value("write", None));
         assert!(!acp_allows_risk_with_value("danger", None));
+        assert!(!acp_allows_risk_with_value("danger", Some("")));
         assert!(!acp_allows_risk_with_value("danger", Some("0")));
         assert!(!acp_allows_risk_with_value("danger", Some("false")));
+        assert!(!acp_allows_risk_with_value("danger", Some("maybe")));
         assert!(acp_allows_risk_with_value("danger", Some("1")));
         assert!(acp_allows_risk_with_value("danger", Some("yes")));
     }
@@ -1163,6 +1248,16 @@ mod tests {
     }
 
     #[test]
+    fn shell_output_keeps_a_bounded_tail() {
+        let mut output = b"1234".to_vec();
+        assert!(push_output_tail(&mut output, b"56789", 6));
+        assert_eq!(output, b"456789");
+
+        assert!(push_output_tail(&mut output, b"abcdefgh", 4));
+        assert_eq!(output, b"efgh");
+    }
+
+    #[test]
     fn merge_shell_env_overrides_existing_keys() {
         let overrides = serde_json::json!({"PATH": "/nano-override-path"});
         let map = overrides.as_object().unwrap();
@@ -1182,6 +1277,10 @@ mod tests {
         assert!(is_safe_command("cargo fmt --check"));
         assert!(is_safe_command("rustfmt --check src/lib.rs"));
         assert!(is_safe_command("rg TODO src"));
+        assert!(!is_safe_command("env touch PWNED"));
+        assert!(!is_safe_command("awk 'BEGIN {system(\"touch PWNED\")}'"));
+        assert!(!is_safe_command("git branch new-branch"));
+        assert!(!is_safe_command("git remote remove origin"));
         assert!(!is_safe_command("cargo fmt"));
         assert!(!is_safe_command("cargo clippy --fix"));
         assert!(!is_safe_command("rustfmt src/lib.rs"));
@@ -1225,6 +1324,7 @@ mod tests {
         );
         assert_eq!(command_risk_label("sudo FOO=bar rmdir old-dir").1, "danger");
         assert_eq!(command_risk_label("git rm src/lib.rs").1, "danger");
+        assert_eq!(command_risk_label("git -C repo rm src/lib.rs").1, "danger");
         assert_eq!(command_risk_label("cd /tmp && rm file.txt").1, "danger");
         assert_eq!(command_risk_label("rm -rf /tmp/x").1, "danger");
         assert_eq!(command_risk_label("dd of=/dev/sda if=image").1, "danger");
@@ -1256,7 +1356,9 @@ mod tests {
         assert_eq!(command_risk_label("git stash drop").1, "danger");
         assert_eq!(command_risk_label("git stash clear").1, "danger");
         assert_eq!(command_risk_label("git branch -D old").1, "danger");
+        assert_eq!(command_risk_label("git branch --delete old").1, "danger");
         assert_eq!(command_risk_label("git tag -d old").1, "danger");
+        assert_eq!(command_risk_label("git tag --delete old").1, "danger");
         assert_eq!(command_risk_label("git worktree remove ../wt").1, "danger");
         assert_eq!(
             command_risk_label("git reflog expire --expire=now --all").1,

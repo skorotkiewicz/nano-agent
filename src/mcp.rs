@@ -8,6 +8,7 @@ use rmcp::service::{Peer, RoleClient, RunningService, serve_client};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -235,6 +236,7 @@ impl McpClient {
                 .join("mcp_cache.json");
             if legacy.exists() {
                 let _ = std::fs::copy(&legacy, &cache_path);
+                ensure_nano_dirs();
             }
         }
 
@@ -360,7 +362,9 @@ impl McpClient {
             if let Some(parent) = self.cache_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&self.cache_path, data);
+            if std::fs::write(&self.cache_path, data).is_ok() {
+                crate::paths::ensure_nano_dirs();
+            }
         }
     }
 
@@ -476,7 +480,10 @@ fn mcp_cache_fingerprint(config: &Config) -> String {
         })
         .collect::<Vec<_>>();
 
-    serde_json::to_string(&servers).unwrap_or_default()
+    let serialized = serde_json::to_string(&servers).unwrap_or_default();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn sanitize_tool_name_part(input: &str) -> String {
@@ -582,6 +589,7 @@ mod tests {
             mcp_cache_fingerprint(&first),
             mcp_cache_fingerprint(&second)
         );
+        assert!(!mcp_cache_fingerprint(&first).contains("docs-server"));
     }
 
     #[test]

@@ -252,7 +252,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
 fn resume_last_session() -> Session {
     let sessions = sessions_in_cwd();
     let Some(last) = sessions.into_iter().next_back() else {
-        eprintln!("no sessions in this directory — starting a fresh one");
+        eprintln!("no sessions in this directory — start fresh without -c");
         std::process::exit(1);
     };
     last

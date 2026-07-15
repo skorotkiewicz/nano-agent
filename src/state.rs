@@ -12,8 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub static APPROVE_ALL: AtomicBool = AtomicBool::new(false);
 /// After the user picks [s] Safe, auto-approve read-only command patterns this turn.
 pub static APPROVE_SAFE: AtomicBool = AtomicBool::new(false);
-/// Set when the user hits Esc/Ctrl+C mid-turn (API wait or long shell).
-pub static CANCEL_TURN: AtomicBool = AtomicBool::new(false);
 pub static ACP_MODE: AtomicBool = AtomicBool::new(false);
 
 static IS_TTY: OnceLock<bool> = OnceLock::new();
@@ -29,7 +27,12 @@ tokio::task_local! {
 }
 
 pub fn get_config() -> &'static Config {
-    CONFIG.get_or_init(Config::load)
+    CONFIG.get_or_init(|| {
+        Config::try_load().unwrap_or_else(|error| {
+            eprintln!("config error: {error}");
+            std::process::exit(2);
+        })
+    })
 }
 
 pub fn get_mcp_client() -> &'static McpClient {
@@ -49,12 +52,9 @@ pub fn acp_mode() -> bool {
     ACP_MODE.load(Ordering::SeqCst)
 }
 
-pub fn clear_cancel() {
-    CANCEL_TURN.store(false, Ordering::SeqCst);
-}
-
-pub fn request_cancel() {
-    CANCEL_TURN.store(true, Ordering::SeqCst);
+pub fn reset_turn_state() {
+    APPROVE_ALL.store(false, Ordering::SeqCst);
+    APPROVE_SAFE.store(false, Ordering::SeqCst);
 }
 
 pub fn get_model() -> &'static str {

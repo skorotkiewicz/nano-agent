@@ -15,6 +15,7 @@ const MAX_SESSIONS: usize = 50;
 // ponytail: hard caps so resume stays usable; raise if long-context session files matter
 const MAX_SESSION_MESSAGES: usize = 200;
 const MAX_MESSAGE_CHARS: usize = 4_000;
+const MAX_LABEL_CHARS: usize = 80;
 static MIGRATE_ONCE: Once = Once::new();
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -79,14 +80,8 @@ impl SessionState {
                 }));
             }
             SessionState::Responses {
-                messages,
-                pending_context,
-                ..
+                pending_context, ..
             } => {
-                messages.push(serde_json::json!({
-                    "role": "user",
-                    "content": note.clone(),
-                }));
                 // Stack notes if user runs several `!` before chatting.
                 *pending_context = Some(match pending_context.take() {
                     Some(prev) => format!("{prev}\n\n{note}"),
@@ -105,6 +100,22 @@ impl SessionState {
             SessionState::Chat { .. } => None,
         }
     }
+
+    pub fn restore_pending_context(&mut self, context: Option<String>) {
+        if let (
+            SessionState::Responses {
+                pending_context, ..
+            },
+            Some(context),
+        ) = (self, context)
+        {
+            *pending_context = Some(context);
+        }
+    }
+}
+
+pub fn normalize_session_label(label: &str) -> String {
+    label.chars().take(MAX_LABEL_CHARS).collect()
 }
 
 impl Session {
@@ -245,7 +256,7 @@ pub fn save_session(
 
     sessions.push(Session {
         id: response_id.to_string(),
-        label: label.chars().take(80).collect(),
+        label: normalize_session_label(label),
         cwd,
         ts: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -318,7 +329,19 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
         std::process::id()
     ));
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options.open(&tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         f.write_all(data)?;
         f.sync_all()?;
     }
@@ -373,7 +396,7 @@ pub fn pick_session() -> Option<Session> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, append_session_messages};
+    use super::{Session, append_session_messages, normalize_session_label};
     use crate::provider::ApiFormat;
 
     #[test]
@@ -445,9 +468,23 @@ mod tests {
 
         let mut resp = SessionState::new(ApiFormat::Responses);
         resp.note_user_shell("pwd", "/tmp");
+        match &resp {
+            SessionState::Responses { messages, .. } => assert!(messages.is_empty()),
+            _ => panic!("expected responses"),
+        }
         let pending = resp.take_pending_context().unwrap();
         assert!(pending.contains("pwd"));
+        resp.restore_pending_context(Some(pending));
+        assert!(resp.take_pending_context().is_some());
         assert!(resp.take_pending_context().is_none());
+    }
+
+    #[test]
+    fn session_labels_are_stable_at_the_storage_limit() {
+        let long = "x".repeat(100);
+        let normalized = normalize_session_label(&long);
+        assert_eq!(normalized.chars().count(), 80);
+        assert_eq!(normalize_session_label(&normalized), normalized);
     }
 
     #[test]

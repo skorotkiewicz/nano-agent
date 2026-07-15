@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Repo-local `nano_config.json` is now opt-in with `NANO_TRUST_PROJECT_CONFIG=1`, preventing cloned repos from silently redirecting API credentials or launching MCP commands.
+- Invalid config and unknown configured providers now fail loud instead of falling through to another endpoint.
+- Esc during model-requested shell execution now cancels the turn instead of returning a normal tool result and continuing.
+- Shell output is bounded while streaming, preventing noisy commands from exhausting Nano's memory before truncation.
+- Nano-owned state under `~/.nano` is made private on Unix, and MCP cache fingerprints no longer contain raw config secrets.
+- Tool-loop limits now inspect the final post-tool response instead of fetching and discarding it.
+- Mito turns reset `[a]all`/`[s]safe` approval state before using tools.
+- Long session labels remain stable, trimmed Chat history drops orphan tool results, and cancelled Responses turns preserve pending `!` context.
+- Executable readers (`env`, `awk`, `sed`, `find`) and mutating `git branch`/`git remote` forms are no longer tagged `[safe]`.
 - Approval prompts show the documented `[safe]`, `[write]`, or `[danger]` risk tag again.
 - Approval prompts now show non-default `cwd`/`timeout`/`env`, so write/delete commands are easier to judge.
 - Secret-looking env values in approval prompts are redacted.

@@ -5,6 +5,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+const NANO_TRUST_PROJECT_CONFIG_ENV: &str = "NANO_TRUST_PROJECT_CONFIG";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CustomProvider {
     pub provider_type: String,
@@ -87,26 +89,48 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        let global = Self::load_from_path(&config_path_global());
-        let local = Self::load_from_path(&config_path_local());
+        Self::try_load().unwrap_or_default()
+    }
+
+    pub fn try_load() -> Result<Self, String> {
+        let global = Self::load_from_path(&config_path_global())?;
+        let local_path = config_path_local();
+        let local = if project_config_enabled(
+            std::env::var(NANO_TRUST_PROJECT_CONFIG_ENV).ok().as_deref(),
+        ) {
+            Self::load_from_path(&local_path)?
+        } else {
+            if local_path.exists() {
+                eprintln!(
+                    "ignoring '{}'; set {NANO_TRUST_PROJECT_CONFIG_ENV}=1 to trust project config",
+                    local_path.display()
+                );
+            }
+            None
+        };
+
         match (global, local) {
             (Some(mut g), Some(l)) => {
                 merge_config_value(&mut g, l);
-                serde_json::from_value(g).unwrap_or_default()
+                serde_json::from_value(g).map_err(|error| format!("invalid merged config: {error}"))
             }
-            (Some(g), None) | (None, Some(g)) => serde_json::from_value(g).unwrap_or_default(),
-            (None, None) => Self::default(),
+            (Some(g), None) | (None, Some(g)) => {
+                serde_json::from_value(g).map_err(|error| format!("invalid config: {error}"))
+            }
+            (None, None) => Ok(Self::default()),
         }
     }
 
-    fn load_from_path(path: &PathBuf) -> Option<Value> {
+    fn load_from_path(path: &PathBuf) -> Result<Option<Value>, String> {
         if path.exists() {
-            let data = std::fs::read_to_string(path).ok()?;
-            let mut value: Value = serde_json::from_str(&data).ok()?;
+            let data = std::fs::read_to_string(path)
+                .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+            let mut value: Value = serde_json::from_str(&data)
+                .map_err(|error| format!("invalid JSON in '{}': {error}", path.display()))?;
             normalize_config_value(&mut value);
-            Some(value)
+            Ok(Some(value))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -133,6 +157,15 @@ impl Config {
     pub fn get_mito_mode(&self) -> &MitoModeConfig {
         &self.mito_mode
     }
+}
+
+fn project_config_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Accept the `mito_mode` alias but store it as the canonical `mito-mode` key.
@@ -175,6 +208,7 @@ fn config_path_global() -> PathBuf {
             .join("config.json");
         if legacy.exists() {
             let _ = std::fs::copy(&legacy, &path);
+            ensure_nano_dirs();
         }
     }
     path
@@ -190,6 +224,15 @@ fn config_path_local() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_config_requires_explicit_trust() {
+        assert!(!project_config_enabled(None));
+        assert!(!project_config_enabled(Some("")));
+        assert!(!project_config_enabled(Some("maybe")));
+        assert!(project_config_enabled(Some("1")));
+        assert!(project_config_enabled(Some("yes")));
+    }
 
     #[test]
     fn test_config_default() {

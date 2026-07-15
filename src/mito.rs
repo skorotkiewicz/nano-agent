@@ -94,6 +94,7 @@ pub async fn run_mito_turn(
     main_state: &mut SessionState,
     main_label: &mut Option<String>,
 ) -> String {
+    crate::state::reset_turn_state();
     let target = match get_mito_target() {
         Ok(target) => target,
         Err(error) => return format!("mito error: {error}"),

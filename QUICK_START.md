@@ -5,7 +5,7 @@
 cargo install --path .
 ```
 
-**2. Configure (create `nano_config.json`):**
+**2. Configure (create `~/.nano/config.json`):**
 ```json
 {
   "provider": "openai-compatible",
@@ -26,6 +26,8 @@ cargo install --path .
 }
 ```
 
+Repo-local `nano_config.json` files are ignored unless you explicitly trust them with `NANO_TRUST_PROJECT_CONFIG=1`.
+
 **3. Run:**
 ```sh
 cargo run -- "your task here"
@@ -43,7 +45,7 @@ cargo run --features acp -- --acp
 ```
 
 **5. Mito Mode (for local model testing):**
-Add to your `nano_config.json`:
+Add to the same `~/.nano/config.json`:
 ```json
 {
   "mito-mode": {

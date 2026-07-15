@@ -80,7 +80,7 @@ All nano state lives under **`~/.nano/`**:
   sessions/<hash>.jsonl    # sessions for one directory
 ```
 
-Project overlay: `./nano_config.json`. See [example_config.json](example_config.json).
+Project overlay: `./nano_config.json`, loaded only with `NANO_TRUST_PROJECT_CONFIG=1` because it may define providers and executable MCP servers. See [example_config.json](example_config.json).
 
 ## Env
 
@@ -91,6 +91,7 @@ Project overlay: `./nano_config.json`. See [example_config.json](example_config.
 | `OPENAI_MODEL` | model id |
 | `NANO_MAX_STEPS` | tool-loop cap (default 200) |
 | `NANO_SANDBOX` | `off` · `fs` (default, no net) · `fs+net` |
+| `NANO_TRUST_PROJECT_CONFIG` | `1` to load this repo's `nano_config.json` |
 
 If a command fails with a network-looking error under the default sandbox, nano prints a `NANO_SANDBOX=fs+net` hint.
 
@@ -108,8 +109,9 @@ If a command fails with a network-looking error under the default sandbox, nano 
 2. **One primary tool.** Multi-tool dragons hide failure modes.
 3. **Short system prompt.** Procedures the model can follow, not a novel.
 4. **Preserve user work.** Before edits/deletes in a git repo, Nano is told to inspect status and avoid clobbering.
-5. **Session resume that fails loud.** Format mismatch → start fresh, don't half-context.
-6. **Sandbox with a name.** `fs` vs `fs+net` vs `off` — isolation is a policy, not a mystery.
+5. **Project config is untrusted by default.** A cloned repo cannot launch MCP commands or redirect API credentials unless you opt in.
+6. **Session resume that fails loud.** Format mismatch → start fresh, don't half-context.
+7. **Sandbox with a name.** `fs` vs `fs+net` vs `off` — isolation is a policy, not a mystery.
 
 ## Arch
 
