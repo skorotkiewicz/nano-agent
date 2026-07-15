@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 const NANO_TRUST_PROJECT_CONFIG_ENV: &str = "NANO_TRUST_PROJECT_CONFIG";
 
@@ -95,17 +96,9 @@ impl Config {
     pub fn try_load() -> Result<Self, String> {
         let global = Self::load_from_path(&config_path_global())?;
         let local_path = config_path_local();
-        let local = if project_config_enabled(
-            std::env::var(NANO_TRUST_PROJECT_CONFIG_ENV).ok().as_deref(),
-        ) {
+        let local = if local_path.exists() && project_config_allowed(&local_path)? {
             Self::load_from_path(&local_path)?
         } else {
-            if local_path.exists() {
-                eprintln!(
-                    "ignoring '{}'; set {NANO_TRUST_PROJECT_CONFIG_ENV}=1 to trust project config",
-                    local_path.display()
-                );
-            }
             None
         };
 
@@ -166,6 +159,82 @@ fn project_config_enabled(value: Option<&str>) -> bool {
             "1" | "true" | "yes" | "on"
         )
     })
+}
+
+fn project_config_allowed(config_path: &Path) -> Result<bool, String> {
+    if project_config_enabled(std::env::var(NANO_TRUST_PROJECT_CONFIG_ENV).ok().as_deref()) {
+        return Ok(true);
+    }
+
+    let project = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .canonicalize()
+        .map_err(|error| {
+            format!(
+                "failed to resolve project path '{}': {error}",
+                config_path.display()
+            )
+        })?;
+    let marker = trust_marker_path(&project);
+    if trust_marker_matches(&marker, &project) {
+        return Ok(true);
+    }
+
+    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+        eprintln!(
+            "ignoring '{}'; run Nano interactively once to trust this path, or set {NANO_TRUST_PROJECT_CONFIG_ENV}=1",
+            config_path.display()
+        );
+        return Ok(false);
+    }
+
+    eprintln!(
+        "project config may redirect API requests or start MCP commands:\n  {}",
+        config_path.display()
+    );
+    eprint!(
+        "trust project path '{}' and remember? [y/N] ",
+        project.display()
+    );
+    io::stderr()
+        .flush()
+        .map_err(|error| format!("failed to show project trust prompt: {error}"))?;
+
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| format!("failed to read project trust response: {error}"))?;
+    if !trust_answer(&answer) {
+        eprintln!("project config ignored");
+        return Ok(false);
+    }
+
+    remember_trusted_project(&marker, &project)?;
+    eprintln!("project path trusted");
+    Ok(true)
+}
+
+fn trust_marker_path(project: &Path) -> PathBuf {
+    use crate::paths::{cwd_session_key, nano_trusted_projects_dir};
+
+    nano_trusted_projects_dir().join(cwd_session_key(&project.to_string_lossy()))
+}
+
+fn trust_marker_matches(marker: &Path, project: &Path) -> bool {
+    std::fs::read(marker).is_ok_and(|stored| stored == project.as_os_str().as_encoded_bytes())
+}
+
+fn remember_trusted_project(marker: &Path, project: &Path) -> Result<(), String> {
+    crate::paths::ensure_nano_dirs();
+    std::fs::write(marker, project.as_os_str().as_encoded_bytes())
+        .map_err(|error| format!("failed to remember trusted project: {error}"))?;
+    crate::paths::ensure_nano_dirs();
+    Ok(())
+}
+
+fn trust_answer(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// Accept the `mito_mode` alias but store it as the canonical `mito-mode` key.
@@ -232,6 +301,31 @@ mod tests {
         assert!(!project_config_enabled(Some("maybe")));
         assert!(project_config_enabled(Some("1")));
         assert!(project_config_enabled(Some("yes")));
+        assert!(trust_answer("y\n"));
+        assert!(trust_answer("YES"));
+        assert!(!trust_answer(""));
+        assert!(!trust_answer("no"));
+    }
+
+    #[test]
+    fn trust_marker_matches_only_the_exact_project_path() {
+        let root =
+            std::env::temp_dir().join(format!("nano-project-trust-test-{}", std::process::id()));
+        let project = root.join("project");
+        let other = root.join("other");
+        let markers = root.join("markers");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::create_dir_all(&markers).unwrap();
+        let project = project.canonicalize().unwrap();
+        let other = other.canonicalize().unwrap();
+        let marker = markers.join("trusted");
+        std::fs::write(&marker, project.as_os_str().as_encoded_bytes()).unwrap();
+
+        assert!(trust_marker_matches(&marker, &project));
+        assert!(!trust_marker_matches(&marker, &other));
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

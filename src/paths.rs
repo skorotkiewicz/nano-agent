@@ -20,6 +20,10 @@ pub fn nano_sessions_dir() -> PathBuf {
     nano_home().join("sessions")
 }
 
+pub fn nano_trusted_projects_dir() -> PathBuf {
+    nano_home().join("trusted-projects")
+}
+
 /// Stable, filesystem-safe key for a cwd (FNV-1a hex). Collision risk is
 /// academic; each session still stores its absolute `cwd` for filtering.
 pub fn cwd_session_key(cwd: &str) -> String {
@@ -39,12 +43,22 @@ pub fn session_file_for_cwd(cwd: &str) -> PathBuf {
 pub fn ensure_nano_dirs() {
     let home = nano_home();
     let sessions = home.join("sessions");
+    let trusted_projects = home.join("trusted-projects");
     let _ = std::fs::create_dir_all(&sessions);
+    let _ = std::fs::create_dir_all(&trusted_projects);
     make_private(&home, 0o700);
     make_private(&sessions, 0o700);
+    make_private(&trusted_projects, 0o700);
     make_private(&home.join("config.json"), 0o600);
     make_private(&home.join("mcp_cache.json"), 0o600);
     if let Ok(entries) = std::fs::read_dir(sessions) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                make_private(&entry.path(), 0o600);
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(trusted_projects) {
         for entry in entries.flatten() {
             if entry.file_type().is_ok_and(|kind| kind.is_file()) {
                 make_private(&entry.path(), 0o600);
