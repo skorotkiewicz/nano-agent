@@ -26,7 +26,7 @@ cargo install --path .
 }
 ```
 
-For repo-local `nano_config.json`, Nano asks once on the first interactive run and remembers the exact project path. Non-interactive runs require prior trust or `NANO_TRUST_PROJECT_CONFIG=1`.
+For repo-local `nano_config.json`, Nano asks once on the first interactive run and remembers the exact project path plus its `fs`, `fs+net`, or `net-only` shell sandbox. Non-interactive runs require prior trust or `NANO_TRUST_PROJECT_CONFIG=1`.
 
 **3. Run:**
 ```sh

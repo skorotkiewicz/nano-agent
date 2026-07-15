@@ -19,7 +19,7 @@ use reqwest::Client;
 use self_harness::{run_self_harness, strip_self_harness_prefix};
 use serde_json::Value;
 use session::{Session, SessionState, pick_session, sessions_in_cwd};
-use state::{color, get_config, get_mcp_client};
+use state::{color, get_config, get_mcp_client, sandbox_mode};
 use std::env;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -54,7 +54,7 @@ fn print_usage() {
            OPENAI_BASE_URL    OpenAI-compatible base (implies chat-completions)\n\
            OPENAI_MODEL       model id (default gpt-5.5)\n\
            NANO_MAX_STEPS     tool-loop cap (default 200)\n\
-           NANO_SANDBOX       off | fs (default) | fs+net\n\
+           NANO_SANDBOX       off | fs (default) | fs+net | net-only\n\
            NANO_TRUST_PROJECT_CONFIG=1  bypass project trust prompt\n"
     );
 }
@@ -197,10 +197,7 @@ async fn run_acp_server() -> Result<(), String> {
 
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
     let target = get_api_target();
-    let sandbox = nano_agent::sandbox::SandboxMode::from_env_value(
-        std::env::var("NANO_SANDBOX").ok().as_deref(),
-    )
-    .label();
+    let sandbox = sandbox_mode().label();
     // One quiet banner line — dense, not chatty.
     eprintln!(
         "{}  {}  sandbox:{}  {}",

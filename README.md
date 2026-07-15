@@ -81,10 +81,12 @@ All nano state lives under **`~/.nano/`**:
   config.json              # global config
   mcp_cache.json           # MCP tool cache
   sessions/<hash>.jsonl    # sessions for one directory
-  trusted-projects/<hash>  # exact project paths trusted for local config
+  trusted-projects/<hash>  # exact project path + remembered shell sandbox
 ```
 
-Project overlay: `./nano_config.json`. On first interactive use of a new path, Nano explains the risk and asks once; `y` remembers that exact canonical path. Non-interactive runs ignore untrusted project config. `NANO_TRUST_PROJECT_CONFIG=1` remains an explicit one-run override. See [example_config.json](example_config.json).
+Project overlay: `./nano_config.json`. On first interactive use of a new path, Nano explains the risk, asks for trust, then records an explicit `fs`, `fs+net`, or `net-only` shell sandbox for that exact canonical path. Existing path-only trust markers remain valid and default to `fs`. Non-interactive runs ignore untrusted project config. `NANO_TRUST_PROJECT_CONFIG=1` remains an explicit one-run override. See [example_config.json](example_config.json).
+
+Trust markers stay readable while preserving arbitrary path bytes: the first line is `sandbox=<mode>` and everything after its newline is the exact canonical path.
 
 ## Env
 
@@ -94,10 +96,14 @@ Project overlay: `./nano_config.json`. On first interactive use of a new path, N
 | `OPENAI_BASE_URL` | OpenAI-compatible base → chat-completions |
 | `OPENAI_MODEL` | model id |
 | `NANO_MAX_STEPS` | tool-loop cap (default 200) |
-| `NANO_SANDBOX` | `off` · `fs` (default, no net) · `fs+net` |
+| `NANO_SANDBOX` | `off` · `fs` (default, no net) · `fs+net` · `net-only` |
 | `NANO_TRUST_PROJECT_CONFIG` | `1` to bypass the project-config trust prompt |
 
+An explicit `NANO_SANDBOX` value overrides the remembered project choice for that run.
+
 If a command fails with a network-looking error under the default sandbox, nano prints a `NANO_SANDBOX=fs+net` hint.
+
+`net-only` applies to shell subprocesses: it enables network, hides project/home files, exposes only minimal runtime/DNS/TLS files, uses disposable scratch space, and drops inherited API/cloud credential variables. Nano's API connection and configured MCP servers are separate from this shell sandbox.
 
 ## Optional extras
 
@@ -115,7 +121,7 @@ If a command fails with a network-looking error under the default sandbox, nano 
 4. **Preserve user work.** Before edits/deletes in a git repo, Nano is told to inspect status and avoid clobbering.
 5. **Project config is untrusted by default.** A cloned repo cannot launch MCP commands or redirect API credentials unless you opt in.
 6. **Session resume that fails loud.** Format mismatch → start fresh, don't half-context.
-7. **Sandbox with a name.** `fs` vs `fs+net` vs `off` — isolation is a policy, not a mystery.
+7. **Sandbox with a name.** `fs`, `fs+net`, `net-only`, or `off` — isolation is a policy, not a mystery.
 
 ## Arch
 

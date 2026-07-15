@@ -4,7 +4,7 @@
 use crate::input::CancelListen;
 use crate::input::{LineKey, RawTerminal, read_line_key};
 use crate::policy::{expose_mcp_tools, prepare_shell_execution};
-use crate::state::{APPROVE_ALL, APPROVE_SAFE, acp_mode, color, get_mcp_client};
+use crate::state::{APPROVE_ALL, APPROVE_SAFE, acp_mode, color, get_mcp_client, sandbox_mode};
 #[cfg(feature = "acp")]
 use crate::{
     policy::expose_acp_delegate_tools,
@@ -750,8 +750,16 @@ fn sensitive_env_key(key: &str) -> bool {
 
 fn merge_shell_env(
     overrides: Option<&serde_json::Map<String, serde_json::Value>>,
+    mode: SandboxMode,
 ) -> Vec<(String, String)> {
-    let mut env_map: std::collections::HashMap<String, String> = env::vars().collect();
+    let mut env_map: std::collections::HashMap<String, String> = env::vars()
+        .filter(|(key, _)| mode != SandboxMode::NetOnly || net_only_inherits_env_key(key))
+        .collect();
+    if mode == SandboxMode::NetOnly {
+        env_map.entry("PATH".to_string()).or_insert_with(|| {
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+        });
+    }
     if let Some(overrides) = overrides {
         for (k, v) in overrides {
             if let Some(val) = v.as_str() {
@@ -760,6 +768,26 @@ fn merge_shell_env(
         }
     }
     env_map.into_iter().collect()
+}
+
+fn net_only_inherits_env_key(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key.starts_with("LC_")
+        || matches!(
+            key.as_str(),
+            "PATH"
+                | "LANG"
+                | "LANGUAGE"
+                | "TERM"
+                | "COLORTERM"
+                | "TZ"
+                | "HTTP_PROXY"
+                | "HTTPS_PROXY"
+                | "ALL_PROXY"
+                | "NO_PROXY"
+                | "SSL_CERT_FILE"
+                | "SSL_CERT_DIR"
+        )
 }
 
 fn shell_timeout_secs(args: &serde_json::Value) -> u64 {
@@ -889,15 +917,15 @@ async fn execute_shell(
 
     let (run_cwd, writable_root, force_sandbox) = prepared;
 
-    // NANO_SANDBOX: 0/off | fs (default) | fs+net (share-net for installs/curl).
+    // NANO_SANDBOX overrides the remembered project mode when explicitly set.
     // Restricted ACP children always keep fs isolation; force_sandbox never drops to Off.
     let mode = if force_sandbox {
-        match SandboxMode::from_env_value(env::var("NANO_SANDBOX").ok().as_deref()) {
+        match sandbox_mode() {
             SandboxMode::Off => SandboxMode::Fs,
             other => other,
         }
     } else {
-        SandboxMode::from_env_value(env::var("NANO_SANDBOX").ok().as_deref())
+        sandbox_mode()
     };
     let sandbox = Sandbox::with_mode(mode)
         .with_shell("sh")
@@ -906,7 +934,10 @@ async fn execute_shell(
 
     let mut cmd = sandbox.wrap_command(command);
     cmd.current_dir(&run_cwd);
-    cmd.envs(merge_shell_env(env_vars));
+    if mode == SandboxMode::NetOnly {
+        cmd.env_clear();
+    }
+    cmd.envs(merge_shell_env(env_vars, mode));
 
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -1156,8 +1187,8 @@ mod tests {
     use super::{
         Approval, LineKey, acp_allows_risk_with_value, approval_detail_lines, approval_from_key,
         approval_from_line, approve_all_applies, approve_safe_applies, command_risk_label,
-        is_safe_command, merge_shell_env, push_output_tail, sandbox_network_hint,
-        sensitive_env_key, shell_timeout_secs,
+        is_safe_command, merge_shell_env, net_only_inherits_env_key, push_output_tail,
+        sandbox_network_hint, sensitive_env_key, shell_timeout_secs,
     };
     use nano_agent::sandbox::SandboxMode;
 
@@ -1261,12 +1292,20 @@ mod tests {
     fn merge_shell_env_overrides_existing_keys() {
         let overrides = serde_json::json!({"PATH": "/nano-override-path"});
         let map = overrides.as_object().unwrap();
-        let merged = merge_shell_env(Some(map));
+        let merged = merge_shell_env(Some(map), SandboxMode::Fs);
         let path = merged
             .iter()
             .find(|(k, _)| k == "PATH")
             .map(|(_, v)| v.as_str());
         assert_eq!(path, Some("/nano-override-path"));
+    }
+
+    #[test]
+    fn net_only_environment_excludes_credentials() {
+        assert!(net_only_inherits_env_key("PATH"));
+        assert!(net_only_inherits_env_key("https_proxy"));
+        assert!(!net_only_inherits_env_key("OPENAI_API_KEY"));
+        assert!(!net_only_inherits_env_key("AWS_SECRET_ACCESS_KEY"));
     }
 
     #[test]
@@ -1408,6 +1447,7 @@ mod tests {
         let output = "$ cargo test\nexit 101\nCould not resolve host: index.crates.io\n";
         assert!(sandbox_network_hint(SandboxMode::Fs, output).is_some());
         assert!(sandbox_network_hint(SandboxMode::FsNet, output).is_none());
+        assert!(sandbox_network_hint(SandboxMode::NetOnly, output).is_none());
         assert!(sandbox_network_hint(SandboxMode::Off, output).is_none());
         assert!(sandbox_network_hint(SandboxMode::Fs, "exit 1\nsyntax error").is_none());
     }

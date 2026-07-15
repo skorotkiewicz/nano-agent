@@ -2,7 +2,7 @@
 
 #[cfg(feature = "acp")]
 use nano_agent::acp::AcpAgentManager;
-use nano_agent::{config::Config, mcp::McpClient};
+use nano_agent::{config::Config, mcp::McpClient, sandbox::SandboxMode};
 use std::env;
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -84,6 +84,20 @@ pub fn get_max_steps() -> usize {
     })
 }
 
+pub fn sandbox_mode() -> SandboxMode {
+    resolve_sandbox_mode(
+        env::var("NANO_SANDBOX").ok().as_deref(),
+        get_config().project_sandbox,
+    )
+}
+
+fn resolve_sandbox_mode(env_value: Option<&str>, project_mode: Option<SandboxMode>) -> SandboxMode {
+    match env_value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => SandboxMode::from_env_value(Some(value)),
+        None => project_mode.unwrap_or(SandboxMode::Fs),
+    }
+}
+
 pub fn color(code: &str, text: &str) -> String {
     if is_tty() {
         format!("\x1b[{}m{}\x1b[0m", code, text)
@@ -124,7 +138,25 @@ pub fn context_cwd() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_tail;
+    use super::{resolve_sandbox_mode, truncate_tail};
+    use nano_agent::sandbox::SandboxMode;
+
+    #[test]
+    fn sandbox_env_overrides_project_then_defaults_to_fs() {
+        assert_eq!(resolve_sandbox_mode(None, None), SandboxMode::Fs);
+        assert_eq!(
+            resolve_sandbox_mode(None, Some(SandboxMode::NetOnly)),
+            SandboxMode::NetOnly
+        );
+        assert_eq!(
+            resolve_sandbox_mode(Some("fs+net"), Some(SandboxMode::NetOnly)),
+            SandboxMode::FsNet
+        );
+        assert_eq!(
+            resolve_sandbox_mode(Some(""), Some(SandboxMode::NetOnly)),
+            SandboxMode::NetOnly
+        );
+    }
 
     #[test]
     fn truncate_tail_respects_utf8_boundaries() {

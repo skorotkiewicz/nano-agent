@@ -1,5 +1,6 @@
 //! Configuration: load, merge, and expose provider/MCP/ACP/mito settings.
 
+use crate::sandbox::SandboxMode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -109,6 +110,9 @@ pub struct Config {
     pub acp_agents: HashMap<String, AcpAgentConfig>,
     #[serde(default, rename = "mito-mode", alias = "mito_mode")]
     pub mito_mode: MitoModeConfig,
+    /// Runtime-only sandbox preference read from the trusted-project marker.
+    #[serde(skip)]
+    pub project_sandbox: Option<SandboxMode>,
 }
 
 impl Config {
@@ -119,13 +123,18 @@ impl Config {
     pub fn try_load() -> Result<Self, String> {
         let global = Self::load_from_path(&config_path_global())?;
         let local_path = config_path_local();
-        let local = if local_path.exists() && project_config_allowed(&local_path)? {
-            Self::load_from_path(&local_path)?
+        let trust = if local_path.exists() {
+            project_config_trust(&local_path)?
         } else {
-            None
+            ProjectConfigTrust::denied()
         };
+        let local = trust
+            .allowed
+            .then(|| Self::load_from_path(&local_path))
+            .transpose()?
+            .flatten();
 
-        match (global, local) {
+        let mut config = match (global, local) {
             (Some(mut g), Some(l)) => {
                 merge_config_value(&mut g, l);
                 serde_json::from_value(g).map_err(|error| format!("invalid merged config: {error}"))
@@ -134,7 +143,9 @@ impl Config {
                 serde_json::from_value(g).map_err(|error| format!("invalid config: {error}"))
             }
             (None, None) => Ok(Self::default()),
-        }
+        }?;
+        config.project_sandbox = trust.sandbox;
+        Ok(config)
     }
 
     fn load_from_path(path: &PathBuf) -> Result<Option<Value>, String> {
@@ -179,6 +190,34 @@ impl Config {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectConfigTrust {
+    allowed: bool,
+    sandbox: Option<SandboxMode>,
+}
+
+impl ProjectConfigTrust {
+    fn denied() -> Self {
+        Self {
+            allowed: false,
+            sandbox: None,
+        }
+    }
+
+    fn allowed(sandbox: Option<SandboxMode>) -> Self {
+        Self {
+            allowed: true,
+            sandbox,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct StoredProjectTrust {
+    sandbox: SandboxMode,
+    legacy: bool,
+}
+
 fn project_config_enabled(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
         matches!(
@@ -188,11 +227,7 @@ fn project_config_enabled(value: Option<&str>) -> bool {
     })
 }
 
-fn project_config_allowed(config_path: &Path) -> Result<bool, String> {
-    if project_config_enabled(std::env::var(NANO_TRUST_PROJECT_CONFIG_ENV).ok().as_deref()) {
-        return Ok(true);
-    }
-
+fn project_config_trust(config_path: &Path) -> Result<ProjectConfigTrust, String> {
     let project = config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -204,8 +239,20 @@ fn project_config_allowed(config_path: &Path) -> Result<bool, String> {
             )
         })?;
     let marker = trust_marker_path(&project);
-    if trust_marker_matches(&marker, &project) {
-        return Ok(true);
+    if let Some(stored) = read_trust_marker(&marker, &project) {
+        let sandbox = if stored.legacy && io::stdin().is_terminal() && io::stderr().is_terminal() {
+            let sandbox = prompt_project_sandbox()?;
+            remember_trusted_project(&marker, &project, sandbox)?;
+            eprintln!("updated trusted project with sandbox={}", sandbox.label());
+            sandbox
+        } else {
+            stored.sandbox
+        };
+        return Ok(ProjectConfigTrust::allowed(Some(sandbox)));
+    }
+
+    if project_config_enabled(std::env::var(NANO_TRUST_PROJECT_CONFIG_ENV).ok().as_deref()) {
+        return Ok(ProjectConfigTrust::allowed(None));
     }
 
     if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
@@ -213,7 +260,7 @@ fn project_config_allowed(config_path: &Path) -> Result<bool, String> {
             "ignoring '{}'; run Nano interactively once to trust this path, or set {NANO_TRUST_PROJECT_CONFIG_ENV}=1",
             config_path.display()
         );
-        return Ok(false);
+        return Ok(ProjectConfigTrust::denied());
     }
 
     eprintln!(
@@ -234,12 +281,13 @@ fn project_config_allowed(config_path: &Path) -> Result<bool, String> {
         .map_err(|error| format!("failed to read project trust response: {error}"))?;
     if !trust_answer(&answer) {
         eprintln!("project config ignored");
-        return Ok(false);
+        return Ok(ProjectConfigTrust::denied());
     }
 
-    remember_trusted_project(&marker, &project)?;
-    eprintln!("project path trusted");
-    Ok(true)
+    let sandbox = prompt_project_sandbox()?;
+    remember_trusted_project(&marker, &project, sandbox)?;
+    eprintln!("project path trusted with sandbox={}", sandbox.label());
+    Ok(ProjectConfigTrust::allowed(Some(sandbox)))
 }
 
 fn trust_marker_path(project: &Path) -> PathBuf {
@@ -248,20 +296,71 @@ fn trust_marker_path(project: &Path) -> PathBuf {
     nano_trusted_projects_dir().join(cwd_session_key(&project.to_string_lossy()))
 }
 
-fn trust_marker_matches(marker: &Path, project: &Path) -> bool {
-    std::fs::read(marker).is_ok_and(|stored| stored == project.as_os_str().as_encoded_bytes())
+fn read_trust_marker(marker: &Path, project: &Path) -> Option<StoredProjectTrust> {
+    let stored = std::fs::read(marker).ok()?;
+    let project_bytes = project.as_os_str().as_encoded_bytes();
+    if stored == project_bytes {
+        return Some(StoredProjectTrust {
+            sandbox: SandboxMode::Fs,
+            legacy: true,
+        });
+    }
+
+    let newline = stored.iter().position(|byte| *byte == b'\n')?;
+    let header = std::str::from_utf8(&stored[..newline]).ok()?;
+    let sandbox = SandboxMode::from_project_value(header.strip_prefix("sandbox=")?)?;
+    (&stored[newline + 1..] == project_bytes).then_some(StoredProjectTrust {
+        sandbox,
+        legacy: false,
+    })
 }
 
-fn remember_trusted_project(marker: &Path, project: &Path) -> Result<(), String> {
+fn remember_trusted_project(
+    marker: &Path,
+    project: &Path,
+    sandbox: SandboxMode,
+) -> Result<(), String> {
     crate::paths::ensure_nano_dirs();
-    std::fs::write(marker, project.as_os_str().as_encoded_bytes())
+    let contents = trust_marker_contents(project, sandbox);
+    std::fs::write(marker, contents)
         .map_err(|error| format!("failed to remember trusted project: {error}"))?;
     crate::paths::ensure_nano_dirs();
     Ok(())
 }
 
+fn trust_marker_contents(project: &Path, sandbox: SandboxMode) -> Vec<u8> {
+    let mut contents = format!("sandbox={}\n", sandbox.label()).into_bytes();
+    contents.extend_from_slice(project.as_os_str().as_encoded_bytes());
+    contents
+}
+
 fn trust_answer(answer: &str) -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn prompt_project_sandbox() -> Result<SandboxMode, String> {
+    eprintln!("shell sandbox for this project:");
+    eprintln!("  fs        project files, no network (default)");
+    eprintln!("  fs+net    project files and network");
+    eprintln!("  net-only  network with no project/home files");
+    eprint!("sandbox [fs/fs+net/net-only]: ");
+    io::stderr()
+        .flush()
+        .map_err(|error| format!("failed to show sandbox prompt: {error}"))?;
+
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| format!("failed to read sandbox response: {error}"))?;
+    Ok(project_sandbox_answer(&answer))
+}
+
+fn project_sandbox_answer(answer: &str) -> SandboxMode {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "fs+net" | "b" | "both" => SandboxMode::FsNet,
+        "net-only" | "n" => SandboxMode::NetOnly,
+        _ => SandboxMode::Fs,
+    }
 }
 
 /// Accept the `mito_mode` alias but store it as the canonical `mito-mode` key.
@@ -332,10 +431,13 @@ mod tests {
         assert!(trust_answer("YES"));
         assert!(!trust_answer(""));
         assert!(!trust_answer("no"));
+        assert_eq!(project_sandbox_answer(""), SandboxMode::Fs);
+        assert_eq!(project_sandbox_answer("fs+net"), SandboxMode::FsNet);
+        assert_eq!(project_sandbox_answer("n"), SandboxMode::NetOnly);
     }
 
     #[test]
-    fn trust_marker_matches_only_the_exact_project_path() {
+    fn trust_marker_stores_sandbox_for_only_the_exact_project_path() {
         let root =
             std::env::temp_dir().join(format!("nano-project-trust-test-{}", std::process::id()));
         let project = root.join("project");
@@ -347,10 +449,42 @@ mod tests {
         let project = project.canonicalize().unwrap();
         let other = other.canonicalize().unwrap();
         let marker = markers.join("trusted");
-        std::fs::write(&marker, project.as_os_str().as_encoded_bytes()).unwrap();
 
-        assert!(trust_marker_matches(&marker, &project));
-        assert!(!trust_marker_matches(&marker, &other));
+        // Existing path-only markers remain trusted and default to `fs`.
+        std::fs::write(&marker, project.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(
+            read_trust_marker(&marker, &project),
+            Some(StoredProjectTrust {
+                sandbox: SandboxMode::Fs,
+                legacy: true,
+            })
+        );
+
+        let contents = trust_marker_contents(&project, SandboxMode::FsNet);
+        std::fs::write(&marker, contents).unwrap();
+
+        assert_eq!(
+            read_trust_marker(&marker, &project),
+            Some(StoredProjectTrust {
+                sandbox: SandboxMode::FsNet,
+                legacy: false,
+            })
+        );
+        assert_eq!(read_trust_marker(&marker, &other), None);
+
+        let contents = trust_marker_contents(&project, SandboxMode::NetOnly);
+        assert!(contents.starts_with(b"sandbox=net-only\n"));
+        std::fs::write(&marker, contents).unwrap();
+        assert_eq!(
+            read_trust_marker(&marker, &project),
+            Some(StoredProjectTrust {
+                sandbox: SandboxMode::NetOnly,
+                legacy: false,
+            })
+        );
+
+        std::fs::write(&marker, b"sandbox=off\n/path").unwrap();
+        assert_eq!(read_trust_marker(&marker, &project), None);
 
         let _ = std::fs::remove_dir_all(root);
     }

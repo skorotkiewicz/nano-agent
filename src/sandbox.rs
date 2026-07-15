@@ -13,18 +13,32 @@ pub enum SandboxMode {
     Fs,
     /// Filesystem isolation plus host network (`--share-net`).
     FsNet,
+    /// Host network with only runtime files and private scratch space.
+    NetOnly,
 }
 
 impl SandboxMode {
     /// Parse `NANO_SANDBOX` (and friends). Empty/unset defaults to `Fs`.
     ///
-    /// Accepts: `0|false|no|off`, `1|true|yes|on|fs`, `net|fs+net|share-net`.
+    /// Accepts: `0|false|no|off`, `1|true|yes|on|fs`,
+    /// `net|fs+net|share-net`, and `net-only`.
     pub fn from_env_value(value: Option<&str>) -> Self {
         match value.map(str::trim).filter(|v| !v.is_empty()) {
             None => Self::Fs,
             Some(v) if is_false_flag(v) => Self::Off,
+            Some(v) if is_net_only_mode(v) => Self::NetOnly,
             Some(v) if is_net_mode(v) => Self::FsNet,
             Some(_) => Self::Fs,
+        }
+    }
+
+    /// Parse modes that may be persisted for a trusted project.
+    pub fn from_project_value(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fs" => Some(Self::Fs),
+            "fs+net" => Some(Self::FsNet),
+            "net-only" => Some(Self::NetOnly),
+            _ => None,
         }
     }
 
@@ -37,6 +51,7 @@ impl SandboxMode {
             Self::Off => "off",
             Self::Fs => "fs",
             Self::FsNet => "fs+net",
+            Self::NetOnly => "net-only",
         }
     }
 }
@@ -52,6 +67,13 @@ fn is_net_mode(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
         "net" | "fs+net" | "fs_net" | "share-net" | "sharenet" | "network"
+    )
+}
+
+fn is_net_only_mode(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "net-only" | "net_only" | "network-only"
     )
 }
 
@@ -110,6 +132,10 @@ impl Sandbox {
             return cmd;
         }
 
+        if self.mode == SandboxMode::NetOnly {
+            return self.wrap_net_only(command);
+        }
+
         let mut cmd = Command::new("bwrap");
         cmd.args(["--ro-bind", "/", "/"]);
 
@@ -127,6 +153,46 @@ impl Sandbox {
         if matches!(self.mode, SandboxMode::FsNet) {
             cmd.arg("--share-net");
         }
+        cmd.args(["--die-with-parent", &self.shell, "-c", command]);
+        cmd
+    }
+
+    fn wrap_net_only(&self, command: &str) -> Command {
+        let mut cmd = Command::new("bwrap");
+
+        // Executables and shared libraries only; do not expose the host root,
+        // project cwd, home directories, or persistent writable storage.
+        for path in [
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/nix/store",
+            "/run/current-system",
+        ] {
+            cmd.arg("--ro-bind-try").arg(path).arg(path);
+        }
+
+        // Minimal name-resolution and TLS material needed by network clients.
+        cmd.args(["--dir", "/etc"]);
+        for path in [
+            "/etc/resolv.conf",
+            "/etc/hosts",
+            "/etc/nsswitch.conf",
+            "/etc/gai.conf",
+            "/etc/localtime",
+            "/etc/ssl/certs",
+            "/etc/pki/ca-trust",
+            "/etc/pki/tls/certs/ca-bundle.crt",
+        ] {
+            cmd.arg("--ro-bind-try").arg(path).arg(path);
+        }
+
+        cmd.args(["--proc", "/proc", "--dev", "/dev"]);
+        cmd.args(["--tmpfs", "/tmp", "--tmpfs", "/work"]);
+        cmd.args(["--chdir", "/work", "--unshare-all", "--share-net"]);
+        cmd.args(["--setenv", "HOME", "/tmp", "--setenv", "TMPDIR", "/tmp"]);
         cmd.args(["--die-with-parent", &self.shell, "-c", command]);
         cmd
     }
@@ -220,6 +286,15 @@ mod tests {
             SandboxMode::from_env_value(Some("fs+net")),
             SandboxMode::FsNet
         );
+        assert_eq!(
+            SandboxMode::from_env_value(Some("net-only")),
+            SandboxMode::NetOnly
+        );
+        assert_eq!(
+            SandboxMode::from_project_value("net-only"),
+            Some(SandboxMode::NetOnly)
+        );
+        assert_eq!(SandboxMode::from_project_value("off"), None);
     }
 
     #[test]
@@ -229,5 +304,20 @@ mod tests {
         let debug = format!("{:?}", cmd.as_std());
         assert!(debug.contains("share-net") || debug.contains("\"--share-net\""));
         assert!(debug.contains("unshare-all") || debug.contains("\"--unshare-all\""));
+    }
+
+    #[test]
+    fn net_only_hides_host_files_and_uses_private_scratch() {
+        let sb =
+            Sandbox::with_mode(SandboxMode::NetOnly).with_cwd(PathBuf::from("/secret/project"));
+        let cmd = sb.wrap_command("true");
+        let debug = format!("{:?}", cmd.as_std());
+
+        assert!(debug.contains("share-net"));
+        assert!(debug.contains("/work"));
+        assert!(debug.contains("/tmp"));
+        assert!(debug.contains("/usr"));
+        assert!(!debug.contains("/secret/project"));
+        assert!(!debug.contains("\"/\" \"/\""));
     }
 }

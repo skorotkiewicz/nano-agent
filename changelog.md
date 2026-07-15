@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-07-15
+
 - Repo-local `nano_config.json` now asks for trust once per canonical project path and remembers the answer under `~/.nano/trusted-projects/`; non-interactive runs still fail closed.
 - `--no-ctx` omits Nano's system prompt and skips project doc, skill, and harness discovery.
 - Individual `mcp_servers` and `acp_agents` entries can now be paused with `"enabled": false`; omitted flags remain enabled for compatibility.
+- Trusted-project markers now remember an explicit shell sandbox; legacy markers default to `fs`, and `NANO_SANDBOX` remains the per-run override.
+- `NANO_SANDBOX=net-only` enables network shell commands with minimal runtime files and private scratch while hiding project/home files and inherited API/cloud credentials.
 - Invalid config and unknown configured providers now fail loud instead of falling through to another endpoint.
 - Esc during model-requested shell execution now cancels the turn instead of returning a normal tool result and continuing.
 - Shell output is bounded while streaming, preventing noisy commands from exhausting Nano's memory before truncation.
@@ -61,4 +65,4 @@ HTTP timeouts, mito handoff schema, drop `chrono`.
 
 ## 0.2.3 and earlier
 
-Shredder rewrite; see git history and `SHREDDER_REPORT.md`.
+see git history

@@ -1,6 +1,6 @@
 //! API provider selection: which endpoint, wire format, key, and model to use.
 
-use crate::state::{get_config, get_model};
+use crate::state::{get_config, get_model, sandbox_mode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -87,9 +87,7 @@ pub fn print_effective_config() {
     } else {
         "(set)"
     };
-    let sandbox =
-        nano_agent::sandbox::SandboxMode::from_env_value(env::var("NANO_SANDBOX").ok().as_deref())
-            .label();
+    let sandbox = sandbox_mode().label();
     let provider = config.get_provider().unwrap_or("(default)");
     let base_url_env = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "(unset)".to_string());
     let model_env = env::var("OPENAI_MODEL").unwrap_or_else(|_| "(unset)".to_string());
