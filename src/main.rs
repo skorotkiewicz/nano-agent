@@ -54,7 +54,8 @@ fn print_usage() {
            OPENAI_BASE_URL    OpenAI-compatible base (implies chat-completions)\n\
            OPENAI_MODEL       model id (default gpt-5.5)\n\
            NANO_MAX_STEPS     tool-loop cap (default 200)\n\
-           NANO_SANDBOX       off | fs (default) | fs+net\n"
+           NANO_SANDBOX       off | fs (default) | fs+net\n\
+           NANO_TRUST_PROJECT_CONFIG=1  bypass project trust prompt\n"
     );
 }
 

@@ -25,9 +25,12 @@ nano-agent "fix the failing test"   # one-shot
 nano-agent                          # REPL
 nano-agent -c                       # continue last session here
 nano-agent -s                       # pick a recent session
+nano-agent --no-ctx                 # no Nano/project system context
 nano-agent --show-config
 nano-agent --help
 ```
+
+`--no-ctx` omits Nano's own system prompt and skips project doc, skill, and harness discovery. Configuration, explicit session history, and tools still work normally.
 
 Approval for each command:
 
@@ -78,9 +81,10 @@ All nano state lives under **`~/.nano/`**:
   config.json              # global config
   mcp_cache.json           # MCP tool cache
   sessions/<hash>.jsonl    # sessions for one directory
+  trusted-projects/<hash>  # exact project paths trusted for local config
 ```
 
-Project overlay: `./nano_config.json`, loaded only with `NANO_TRUST_PROJECT_CONFIG=1` because it may define providers and executable MCP servers. See [example_config.json](example_config.json).
+Project overlay: `./nano_config.json`. On first interactive use of a new path, Nano explains the risk and asks once; `y` remembers that exact canonical path. Non-interactive runs ignore untrusted project config. `NANO_TRUST_PROJECT_CONFIG=1` remains an explicit one-run override. See [example_config.json](example_config.json).
 
 ## Env
 
@@ -91,7 +95,7 @@ Project overlay: `./nano_config.json`, loaded only with `NANO_TRUST_PROJECT_CONF
 | `OPENAI_MODEL` | model id |
 | `NANO_MAX_STEPS` | tool-loop cap (default 200) |
 | `NANO_SANDBOX` | `off` · `fs` (default, no net) · `fs+net` |
-| `NANO_TRUST_PROJECT_CONFIG` | `1` to load this repo's `nano_config.json` |
+| `NANO_TRUST_PROJECT_CONFIG` | `1` to bypass the project-config trust prompt |
 
 If a command fails with a network-looking error under the default sandbox, nano prints a `NANO_SANDBOX=fs+net` hint.
 

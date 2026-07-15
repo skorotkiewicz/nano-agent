@@ -26,11 +26,12 @@ cargo install --path .
 }
 ```
 
-Repo-local `nano_config.json` files are ignored unless you explicitly trust them with `NANO_TRUST_PROJECT_CONFIG=1`.
+For repo-local `nano_config.json`, Nano asks once on the first interactive run and remembers the exact project path. Non-interactive runs require prior trust or `NANO_TRUST_PROJECT_CONFIG=1`.
 
 **3. Run:**
 ```sh
 cargo run -- "your task here"
+cargo run -- --no-ctx "chat without Nano/project instructions"
 ```
 
 Or enter REPL mode:
