@@ -23,6 +23,7 @@
   },
   "mcp_servers": {
     "filesystem": {
+      "enabled": true,
       "command": "npx",
       "args": [
         "-y",
@@ -35,6 +36,7 @@
       "show_logs": false
     },
     "docs": {
+      "enabled": true,
       "command": "uvx",
       "args": [
         "--from",
@@ -49,6 +51,7 @@
       "show_logs": true
     },
     "context7": {
+      "enabled": true,
       "command": null,
       "args": [],
       "env": {},
@@ -61,6 +64,7 @@
   },
   "acp_agents": {
     "coder": {
+      "enabled": true,
       "command": "cargo",
       "args": [
         "run",
@@ -76,6 +80,7 @@
       "timeout_secs": 600
     },
     "reviewer": {
+      "enabled": false,
       "command": "nano-agent",
       "args": [
         "--acp"

@@ -17,8 +17,14 @@ pub struct CustomProvider {
     pub model: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+fn enabled_by_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
@@ -31,6 +37,20 @@ pub struct McpServerConfig {
     pub headers: HashMap<String, String>,
     #[serde(default)]
     pub show_logs: bool,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: enabled_by_default(),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: None,
+            headers: HashMap::new(),
+            show_logs: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -49,6 +69,8 @@ fn default_acp_timeout_secs() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcpAgentConfig {
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -63,6 +85,7 @@ pub struct AcpAgentConfig {
 impl Default for AcpAgentConfig {
     fn default() -> Self {
         Self {
+            enabled: enabled_by_default(),
             command: String::new(),
             args: vec![],
             env: HashMap::new(),
@@ -149,6 +172,10 @@ impl Config {
 
     pub fn get_mito_mode(&self) -> &MitoModeConfig {
         &self.mito_mode
+    }
+
+    pub fn has_enabled_acp_agents(&self) -> bool {
+        self.acp_agents.values().any(|agent| agent.enabled)
     }
 }
 
@@ -401,6 +428,7 @@ mod tests {
         let config = r#"{ "mcp_servers": { "test": {} } }"#;
         let parsed: Config = serde_json::from_str(config).unwrap();
         let server = parsed.mcp_servers.get("test").unwrap();
+        assert!(server.enabled);
         assert!(server.command.is_none());
         assert!(server.args.is_empty());
         assert!(server.env.is_empty());
@@ -443,6 +471,10 @@ mod tests {
                     "args": ["--acp"],
                     "working_directory": "/tmp/project",
                     "timeout_secs": 120
+                },
+                "paused": {
+                    "enabled": false,
+                    "command": "nano-agent"
                 }
             }
         }"#;
@@ -452,6 +484,31 @@ mod tests {
         assert_eq!(agent.args, vec!["--acp"]);
         assert_eq!(agent.working_directory.as_deref(), Some("/tmp/project"));
         assert_eq!(agent.timeout_secs, 120);
+        assert!(agent.enabled);
+        assert!(!parsed.acp_agents.get("paused").unwrap().enabled);
+        assert!(parsed.has_enabled_acp_agents());
+    }
+
+    #[test]
+    fn integration_entries_default_to_enabled_and_can_be_disabled() {
+        let config = r#"{
+            "mcp_servers": {
+                "active": {},
+                "paused": { "enabled": false }
+            },
+            "acp_agents": {
+                "active": { "command": "nano-agent" },
+                "paused": { "enabled": false, "command": "nano-agent" }
+            }
+        }"#;
+        let parsed: Config = serde_json::from_str(config).unwrap();
+
+        assert!(parsed.mcp_servers["active"].enabled);
+        assert!(!parsed.mcp_servers["paused"].enabled);
+        assert!(parsed.acp_agents["active"].enabled);
+        assert!(!parsed.acp_agents["paused"].enabled);
+        assert!(McpServerConfig::default().enabled);
+        assert!(AcpAgentConfig::default().enabled);
     }
 
     #[test]

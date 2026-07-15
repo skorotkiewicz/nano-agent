@@ -4,6 +4,7 @@
 
 - Repo-local `nano_config.json` now asks for trust once per canonical project path and remembers the answer under `~/.nano/trusted-projects/`; non-interactive runs still fail closed.
 - `--no-ctx` omits Nano's system prompt and skips project doc, skill, and harness discovery.
+- Individual `mcp_servers` and `acp_agents` entries can now be paused with `"enabled": false`; omitted flags remain enabled for compatibility.
 - Invalid config and unknown configured providers now fail loud instead of falling through to another endpoint.
 - Esc during model-requested shell execution now cancels the turn instead of returning a normal tool result and continuing.
 - Shell output is bounded while streaming, preventing noisy commands from exhausting Nano's memory before truncation.

@@ -251,13 +251,22 @@ impl McpClient {
     }
 
     pub async fn load_servers(&self, config: &Config) {
-        *self.total_servers.lock().await = config.mcp_servers.len();
-        let fingerprint = mcp_cache_fingerprint(config);
+        let active_config = Config {
+            mcp_servers: config
+                .mcp_servers
+                .iter()
+                .filter(|(_, server)| server.enabled)
+                .map(|(name, server)| (name.clone(), server.clone()))
+                .collect(),
+            ..Default::default()
+        };
+        *self.total_servers.lock().await = active_config.mcp_servers.len();
+        let fingerprint = mcp_cache_fingerprint(&active_config);
 
         {
             let mut configs = self.server_configs.lock().await;
             configs.clear();
-            for (name, server_config) in &config.mcp_servers {
+            for (name, server_config) in &active_config.mcp_servers {
                 configs.insert(name.clone(), server_config.clone());
             }
         }
@@ -273,7 +282,7 @@ impl McpClient {
 
         self.tools.lock().await.clear();
         self.refresh_needed.store(false, Ordering::SeqCst);
-        self.refresh_servers(config.clone(), false).await;
+        self.refresh_servers(active_config, false).await;
     }
 
     async fn refresh_servers(&self, config: Config, keep_cached_on_total_failure: bool) {
@@ -468,6 +477,9 @@ fn mcp_cache_fingerprint(config: &Config) -> String {
         .into_iter()
         .filter_map(|name| {
             let server = config.mcp_servers.get(&name)?;
+            if !server.enabled {
+                return None;
+            }
             Some(json!({
                 "name": name,
                 "command": server.command,
@@ -590,6 +602,55 @@ mod tests {
             mcp_cache_fingerprint(&second)
         );
         assert!(!mcp_cache_fingerprint(&first).contains("docs-server"));
+    }
+
+    #[test]
+    fn disabled_servers_do_not_affect_the_cache_fingerprint() {
+        let empty = Config::default();
+        let disabled: Config = serde_json::from_str(
+            r#"{
+                "mcp_servers": {
+                    "docs": {
+                        "enabled": false,
+                        "command": "must-not-run"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mcp_cache_fingerprint(&empty),
+            mcp_cache_fingerprint(&disabled)
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_servers_are_not_loaded_or_counted() {
+        let mut client = super::McpClient::new();
+        client.cache_path = std::env::temp_dir().join(format!(
+            "nano-agent-disabled-mcp-test-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&client.cache_path);
+        let config: Config = serde_json::from_str(
+            r#"{
+                "mcp_servers": {
+                    "paused": {
+                        "enabled": false,
+                        "command": "must-not-run"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        client.load_servers(&config).await;
+
+        assert_eq!(*client.total_servers.lock().await, 0);
+        assert!(client.server_configs.lock().await.is_empty());
+        assert!(client.tools.lock().await.is_empty());
+        let _ = std::fs::remove_file(&client.cache_path);
     }
 
     #[test]

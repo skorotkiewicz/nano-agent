@@ -148,7 +148,7 @@ fn build_system(cwd: &Path) -> String {
         12,
     );
     #[cfg(feature = "acp")]
-    let delegation: &str = if !get_config().acp_agents.is_empty() {
+    let delegation: &str = if get_config().has_enabled_acp_agents() {
         "\n- delegate_task / delegate_tasks: spawn configured ACP child agents for independent subtasks."
     } else {
         ""

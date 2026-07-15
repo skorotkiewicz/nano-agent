@@ -326,7 +326,11 @@ mod agent {
         }
 
         pub async fn has_agents(&self) -> bool {
-            !self.agent_configs.read().await.is_empty()
+            self.agent_configs
+                .read()
+                .await
+                .values()
+                .any(|agent| agent.enabled)
         }
 
         pub async fn list_agents(&self) -> Vec<String> {
@@ -334,8 +338,9 @@ mod agent {
                 .agent_configs
                 .read()
                 .await
-                .keys()
-                .cloned()
+                .iter()
+                .filter(|(_, agent)| agent.enabled)
+                .map(|(name, _)| name.clone())
                 .collect::<Vec<_>>();
             names.sort();
             names
@@ -378,24 +383,28 @@ mod agent {
             task: &AgentTask,
         ) -> Result<(String, AcpAgentConfig), String> {
             let agents = self.agent_configs.read().await;
-            if agents.is_empty() {
-                return Err("no ACP agents configured".to_string());
-            }
 
             if let Some(agent_name) = task.agent.as_deref() {
                 let config = agents
                     .get(agent_name)
                     .cloned()
                     .ok_or_else(|| format!("unknown ACP agent: {agent_name}"))?;
+                if !config.enabled {
+                    return Err(format!("ACP agent '{agent_name}' is disabled"));
+                }
                 return Ok((agent_name.to_string(), config));
             }
 
-            let mut names = agents.keys().cloned().collect::<Vec<_>>();
+            let mut names = agents
+                .iter()
+                .filter(|(_, agent)| agent.enabled)
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>();
             names.sort();
             let name = names
                 .first()
                 .cloned()
-                .ok_or_else(|| "no ACP agents configured".to_string())?;
+                .ok_or_else(|| "no enabled ACP agents configured".to_string())?;
             let config = agents
                 .get(&name)
                 .cloned()
@@ -407,6 +416,65 @@ mod agent {
     impl Default for AcpAgentManager {
         fn default() -> Self {
             Self::new()
+        }
+    }
+
+    #[cfg(test)]
+    mod manager_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn disabled_agents_are_hidden_and_rejected() {
+            let config: Config = serde_json::from_str(
+                r#"{
+                    "acp_agents": {
+                        "active": { "command": "nano-agent" },
+                        "paused": { "enabled": false, "command": "nano-agent" }
+                    }
+                }"#,
+            )
+            .unwrap();
+            let manager = AcpAgentManager::from_config(&config);
+
+            assert!(manager.has_agents().await);
+            assert_eq!(manager.list_agents().await, ["active"]);
+            assert_eq!(
+                manager
+                    .agent_for_task(&AgentTask::new("task", "prompt"))
+                    .await
+                    .unwrap()
+                    .0,
+                "active"
+            );
+            let error = manager
+                .agent_for_task(&AgentTask::new("task", "prompt").with_agent("paused"))
+                .await
+                .unwrap_err();
+            assert_eq!(error, "ACP agent 'paused' is disabled");
+        }
+
+        #[tokio::test]
+        async fn all_disabled_agents_behave_as_unconfigured() {
+            let manager = AcpAgentManager::new();
+            manager
+                .register_agent(
+                    "paused",
+                    AcpAgentConfig {
+                        enabled: false,
+                        command: "nano-agent".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+
+            assert!(!manager.has_agents().await);
+            assert!(manager.list_agents().await.is_empty());
+            let error = manager
+                .agent_for_task(&AgentTask::new("task", "prompt"))
+                .await
+                .unwrap_err();
+            assert_eq!(error, "no enabled ACP agents configured");
         }
     }
 

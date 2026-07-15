@@ -101,10 +101,10 @@ If a command fails with a network-looking error under the default sandbox, nano 
 
 ## Optional extras
 
-- **MCP** — `mcp_servers` in config
+- **MCP** — `mcp_servers` in config; set an entry's `"enabled": false` to keep it without connecting
 - **mito** — `/mito` local planner (needs `mito-mode` + chat-completions provider)
 - **self-harness** — `/self-harness cargo test` proposes `.nano/harness.md` if validator passes
-- **ACP** — `--features acp` → `nano-agent --acp` and child agents under `acp_agents`
+- **ACP** — `--features acp` → `nano-agent --acp` and child agents under `acp_agents`; disabled entries are not offered or spawned
   - ACP shell calls refuse `[danger]` commands by default; set `NANO_ACP_ALLOW_DANGER=1` in that agent's env to allow them.
 
 ## Design (why this, not AutoGPT)
