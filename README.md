@@ -27,7 +27,7 @@ No args → REPL. That's the product.
     <td align="center">
       <strong>nano, unplugged</strong><br>
       <sub>straight from <code>tty3</code></sub><br><br>
-      <img src="assets/screenshots/screenshot-tty.png" alt="Nano running directly in an Arch Linux TTY" width="562">
+      <img src="assets/screenshots/screenshot-tty.png" alt="Nano running directly in an Arch Linux TTY" width="422">
     </td>
   </tr>
 </table>
