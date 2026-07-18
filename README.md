@@ -19,7 +19,7 @@ No args → REPL. That's the product.
 ## In action
 
 <p align="center">
-  <img src="screenshots/screenshot-3-main.png" alt="A multiline request in Nano's terminal REPL">
+  <img src="assets/screenshots/screenshot-3-main.png" alt="A multiline request in Nano's terminal REPL">
 </p>
 
 <table align="center">
@@ -27,7 +27,7 @@ No args → REPL. That's the product.
     <td align="center">
       <strong>nano, unplugged</strong><br>
       <sub>straight from <code>tty3</code></sub><br><br>
-      <img src="screenshots/screenshot-tty.png" alt="Nano running directly in an Arch Linux TTY" width="562">
+      <img src="assets/screenshots/screenshot-tty.png" alt="Nano running directly in an Arch Linux TTY" width="562">
     </td>
   </tr>
 </table>
@@ -35,10 +35,10 @@ No args → REPL. That's the product.
 <details>
 <summary>More screenshots</summary>
   <p align="center">
-    <img src="screenshots/screenshot-0.png" alt="Nano requesting approval before running a shell command">
+    <img src="assets/screenshots/screenshot-0.png" alt="Nano requesting approval before running a shell command">
   </p>   
   <p align="center">
-    <img src="screenshots/screenshot-4.png" alt="Nano saving a generated file and returning to the prompt" width="570">
+    <img src="assets/screenshots/screenshot-4.png" alt="Nano saving a generated file and returning to the prompt" width="570">
   </p>
 </details>
 
