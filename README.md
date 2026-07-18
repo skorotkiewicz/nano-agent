@@ -1,3 +1,9 @@
+<img src="assets/nano-logo.png" alt="nano-agent logo" width="104" align="right">
+
+<!--<p align="center">
+  <img src="assets/nano-banner.png" alt="nano-agent" width="100%">
+</p>-->
+
 # nano-agent
 
 A tiny shell agent. Talks to any OpenAI-compatible API, runs commands **you approve**, stays out of the way.
@@ -9,6 +15,22 @@ nano-agent "what's in this repo?"
 ```
 
 No args → REPL. That's the product.
+
+## In action
+
+<p align="center">
+  <img src="screenshots/screenshot-3-main.png" alt="A multiline request in Nano's terminal REPL">
+</p>
+
+<details>
+<summary>More screenshots</summary>
+  <p align="center">
+    <img src="screenshots/screenshot-0.png" alt="Nano requesting approval before running a shell command">
+  </p>   
+  <p align="center">
+    <img src="screenshots/Screenshot-4.png" alt="Nano saving a generated file and returning to the prompt" width="570">
+  </p>
+</details>
 
 ## Shape
 
