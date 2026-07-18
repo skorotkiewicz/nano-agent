@@ -22,6 +22,16 @@ No args → REPL. That's the product.
   <img src="screenshots/screenshot-3-main.png" alt="A multiline request in Nano's terminal REPL">
 </p>
 
+<table align="center">
+  <tr>
+    <td align="center">
+      <strong>nano, unplugged</strong><br>
+      <sub>straight from <code>tty3</code></sub><br><br>
+      <img src="screenshots/screenshot-tty.png" alt="Nano running directly in an Arch Linux TTY" width="562">
+    </td>
+  </tr>
+</table>
+
 <details>
 <summary>More screenshots</summary>
   <p align="center">
