@@ -28,7 +28,7 @@ No args → REPL. That's the product.
     <img src="screenshots/screenshot-0.png" alt="Nano requesting approval before running a shell command">
   </p>   
   <p align="center">
-    <img src="screenshots/Screenshot-4.png" alt="Nano saving a generated file and returning to the prompt" width="570">
+    <img src="screenshots/screenshot-4.png" alt="Nano saving a generated file and returning to the prompt" width="570">
   </p>
 </details>
 
