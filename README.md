@@ -1,8 +1,8 @@
-<img src="assets/nano-logo.png" alt="nano-agent logo" width="104" align="right">
-
-<!--<p align="center">
+<p align="center">
   <img src="assets/nano-banner.png" alt="nano-agent" width="100%">
-</p>-->
+</p>
+
+<img src="assets/nano-logo.png" alt="nano-agent logo" width="104" align="right">
 
 # nano-agent
 
