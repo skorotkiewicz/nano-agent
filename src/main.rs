@@ -46,7 +46,7 @@ fn print_usage() {
            :reset             clear history and mito context\n\
            :config            print effective config\n\
            :help              this help\n\
-           /mito ...          local planner handoff\n\
+           :mito ...          local planner handoff\n\
            /self-harness <cmd> propose/keep harness after validator passes\n\
            ! <cmd>            run shell; result shown to model next turn\n\
            !! <cmd>           run shell; result NOT sent to model\n\
@@ -253,7 +253,7 @@ async fn repl(client: &Client, mut state: SessionState, mut label: Option<String
         "{}",
         color(
             "90",
-            ":q · :reset · !shell · !!quiet · \\ multiline · /mito · esc · :help"
+            ":q · :reset · !shell · !!quiet · \\ multiline · :mito · esc · :help"
         )
     );
     let stdin = BufReader::new(tokio::io::stdin());
@@ -445,7 +445,7 @@ mod bang_tests {
         assert_eq!(strip_shell_bang("!"), None);
         assert_eq!(strip_shell_bang("!!"), None);
         assert_eq!(strip_shell_bang("hello"), None);
-        assert_eq!(strip_shell_bang("/mito x"), None);
+        assert_eq!(strip_shell_bang(":mito x"), None);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use reqwest::Client;
 
 pub fn strip_mito_prefix(prompt: &str) -> Option<&str> {
     let trimmed = prompt.trim_start();
-    let rest = trimmed.strip_prefix("/mito")?;
+    let rest = trimmed.strip_prefix(":mito")?;
     if rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace) {
         Some(rest.trim_start())
     } else {
@@ -61,7 +61,7 @@ fn get_mito_system() -> String {
 
     format!(
         "You are Mito, Nano's local planning agent.\n\
-         The user talks to you through /mito messages; the /mito prefix has already been removed.\n\
+         The user talks to you through :mito messages; the :mito prefix has already been removed.\n\
          Keep a separate private context from the primary LLM.\n\
          Your job is to discuss the request with the user, inspect the current directory when useful, and prepare a detailed handoff for the primary LLM.\n\
          Ask concise clarifying questions when the task is underspecified.\n\
@@ -129,10 +129,11 @@ mod tests {
 
     #[test]
     fn strip_mito_prefix_accepts_command_boundary() {
-        assert_eq!(strip_mito_prefix("/mito build this"), Some("build this"));
-        assert_eq!(strip_mito_prefix("  /mito\nbuild this"), Some("build this"));
-        assert_eq!(strip_mito_prefix("/mito"), Some(""));
-        assert_eq!(strip_mito_prefix("/mitochondria"), None);
+        assert_eq!(strip_mito_prefix(":mito build this"), Some("build this"));
+        assert_eq!(strip_mito_prefix("  :mito\nbuild this"), Some("build this"));
+        assert_eq!(strip_mito_prefix(":mito"), Some(""));
+        assert_eq!(strip_mito_prefix("/mito build this"), None);
+        assert_eq!(strip_mito_prefix(":mitochondria"), None);
     }
 
     #[test]

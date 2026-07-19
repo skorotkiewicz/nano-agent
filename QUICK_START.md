@@ -57,7 +57,7 @@ Add to the same `~/.nano/config.json`:
 }
 ```
 
-The `/mito` command is available in the REPL to switch to mito mode, which uses the configured mito-mode settings.
+The `:mito` command is available in the REPL to switch to mito mode, which uses the configured mito-mode settings.
 
 **6. Common just shortcuts:**
 ```sh

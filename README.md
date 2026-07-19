@@ -25,6 +25,16 @@ No args → REPL. That's the product.
 <table align="center">
   <tr>
     <td align="center">
+      <strong><code>/mito</code> planning mode</strong><br>
+      <sub>ask Nano's local planner without leaving the REPL</sub><br><br>
+      <img src="assets/screenshots/screenshot-mito.png" alt="Nano answering through its local Mito planning agent" width="741">
+    </td>
+  </tr>
+</table>
+
+<table align="center">
+  <tr>
+    <td align="center">
       <strong>nano, unplugged</strong><br>
       <sub>straight from <code>tty3</code></sub><br><br>
       <img src="assets/screenshots/screenshot-tty.png" alt="Nano running directly in an Arch Linux TTY" width="422">
@@ -97,7 +107,7 @@ Data-destroying commands like `dd of=...`, `rsync --delete`, and `shred` are `[d
 Git discard/delete commands like `git restore`, `git checkout --`, `git clean`, `git stash drop`, and `git branch -D` are `[danger]`, including common `sudo` / `git -C` forms.
 `[danger]` commands always need explicit `y`; Enter, `a`, and `s` refuse them.
 
-REPL: `›` prompt · `:q` · `:reset` · `:config` · `/mito` · `/self-harness <validator>` · line ending `\` continues.
+REPL: `›` prompt · `:q` · `:reset` · `:config` · `:mito` · `/self-harness <validator>` · line ending `\` continues.
 
 **Shell shortcuts** (no approval — you typed it):
 
@@ -150,7 +160,7 @@ If a command fails with a network-looking error under the default sandbox, nano 
 ## Optional extras
 
 - **MCP** — `mcp_servers` in config; set an entry's `"enabled": false` to keep it without connecting
-- **mito** — `/mito` local planner (needs `mito-mode` + chat-completions provider)
+- **mito** — `:mito` local planner (needs `mito-mode` + chat-completions provider)
 - **self-harness** — `/self-harness cargo test` proposes `.nano/harness.md` if validator passes
 - **ACP** — `--features acp` → `nano-agent --acp` and child agents under `acp_agents`; disabled entries are not offered or spawned
   - ACP shell calls refuse `[danger]` commands by default; set `NANO_ACP_ALLOW_DANGER=1` in that agent's env to allow them.
