@@ -59,8 +59,18 @@ nano-agent -c                       # continue last session here
 nano-agent -s                       # pick a recent session
 nano-agent --no-ctx                 # no Nano/project system context
 nano-agent --show-config
+nano-agent --voice                   # local Moonshine STT + TTS
 nano-agent --help
 ```
+
+### Voice mode
+
+```sh
+pip install moonshine-voice
+nano-agent --voice
+```
+
+`--voice` listens for a completed phrase, sends it through Nano's usual session/tool-approval flow, prints the reply, then speaks it. Moonshine downloads the English STT/TTS models on first use; the mic is paused while Nano speaks to prevent feedback.
 
 `--no-ctx` omits Nano's own system prompt and skips project doc, skill, and harness discovery. Configuration, explicit session history, and tools still work normally.
 

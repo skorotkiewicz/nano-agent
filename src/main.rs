@@ -9,6 +9,7 @@ mod session;
 mod state;
 mod tools;
 mod turn;
+mod voice;
 
 use input::read_repl_input;
 use mito::{run_mito_turn, strip_mito_prefix};
@@ -25,6 +26,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use turn::run_state_turn;
+use voice::VoiceBridge;
 
 fn print_usage() {
     eprintln!(
@@ -36,6 +38,7 @@ fn print_usage() {
            -s                 pick a recent session in this directory\n\
            --no-ctx           omit Nano/project system context\n\
            --show-config      print effective provider/model/sandbox and exit\n\
+           --voice            Moonshine local microphone/STT/TTS mode\n\
            --help, -h         show this help\n\
            --acp              run as ACP stdio agent (needs --features acp)\n\n\
          REPL:\n\
@@ -195,6 +198,46 @@ async fn run_acp_server() -> Result<(), String> {
     server.serve_stdio().await
 }
 
+async fn voice_repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
+    let mut voice = match VoiceBridge::start() {
+        Ok(voice) => voice,
+        Err(error) => {
+            eprintln!("voice error: {error}");
+            return;
+        }
+    };
+    eprintln!("{}", color("90", "Moonshine Voice starting"));
+    let mut mito_messages = Vec::new();
+
+    loop {
+        let prompt = match voice.next_prompt().await {
+            Ok(Some(prompt)) if !prompt.is_empty() => prompt,
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
+            Err(error) => {
+                eprintln!("voice error: {error}");
+                voice.stop().await;
+                return;
+            }
+        };
+        eprintln!("{} {}", color("36", "you >"), prompt);
+        let answer =
+            route_prompt(client, &prompt, &mut state, &mut label, &mut mito_messages).await;
+        if !answer.is_empty() {
+            println!("{}", answer);
+            if let Err(error) = voice.speak(&answer).await {
+                eprintln!("voice error: {error}");
+                voice.stop().await;
+                return;
+            }
+        }
+    }
+
+    if let Err(error) = voice.wait().await {
+        eprintln!("voice error: {error}");
+    }
+}
+
 async fn repl(client: &Client, mut state: SessionState, mut label: Option<String>) {
     let target = get_api_target();
     let sandbox = sandbox_mode().label();
@@ -290,6 +333,7 @@ fn ensure_session_format(current: provider::ApiFormat, session: &Session) {
 async fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
     state::set_no_context(take_flag(&mut args, "--no-ctx"));
+    let voice_mode = take_flag(&mut args, "--voice");
 
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_usage();
@@ -351,7 +395,13 @@ async fn main() {
         _ => {}
     }
 
-    if !prompt.is_empty() {
+    if voice_mode {
+        if !prompt.is_empty() {
+            eprintln!("--voice does not accept a typed prompt");
+            std::process::exit(1);
+        }
+        voice_repl(&client, state, label).await;
+    } else if !prompt.is_empty() {
         let mut mito_messages = Vec::new();
         let answer =
             route_prompt(&client, &prompt, &mut state, &mut label, &mut mito_messages).await;
