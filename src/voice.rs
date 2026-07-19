@@ -45,6 +45,8 @@ def main():
             finally:
                 listener.accepting = True
                 mic.start()
+    except KeyboardInterrupt:
+        pass
     finally:
         mic.stop()
         mic.close()
