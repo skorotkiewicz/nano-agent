@@ -25,7 +25,7 @@ No args → REPL. That's the product.
 <table align="center">
   <tr>
     <td align="center">
-      <strong><code>/mito</code> planning mode</strong><br>
+      <strong><code>:mito</code> planning mode</strong><br>
       <sub>ask Nano's local planner without leaving the REPL</sub><br><br>
       <img src="assets/screenshots/screenshot-mito.png" alt="Nano answering through its local Mito planning agent" width="741">
     </td>
